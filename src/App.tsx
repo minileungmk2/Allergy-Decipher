@@ -28,6 +28,77 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Html5Qrcode } from 'html5-qrcode';
+import appLogo from './assets/images/AllerScan Logo.jpeg';
+
+// --- Transparent Image Helper Component to remove White Background dynamically ---
+const TransparentImage = React.forwardRef<HTMLImageElement, React.ImgHTMLAttributes<HTMLImageElement>>(({ src, alt, className, ...props }, ref) => {
+  const [processedSrc, setProcessedSrc] = useState<string>("");
+
+  useEffect(() => {
+    if (!src) return;
+    
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        setProcessedSrc(src);
+        return;
+      }
+      
+      ctx.drawImage(img, 0, 0);
+      try {
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        
+        // Remove white or near-white background pixels smoothly using alpha blending
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          const a = data[i + 3];
+          
+          if (a === 0) continue;
+
+          const threshold = 230;
+          if (r > threshold && g > threshold && b > threshold) {
+            const maxVal = Math.max(r, g, b);
+            const factor = (255 - maxVal) / (255 - threshold);
+            data[i + 3] = Math.min(a, Math.round(a * Math.pow(factor, 1.5)));
+          }
+        }
+        
+        ctx.putImageData(imageData, 0, 0);
+        setProcessedSrc(canvas.toDataURL("image/png"));
+      } catch (e) {
+        console.error("Canvas transparency process failed:", e);
+        setProcessedSrc(src);
+      }
+    };
+    img.onerror = () => {
+      setProcessedSrc(src);
+    };
+    img.src = src;
+  }, [src]);
+
+  return (
+    <img 
+      ref={ref}
+      src={processedSrc || src} 
+      alt={alt} 
+      className={className} 
+      referrerPolicy="no-referrer"
+      {...props} 
+    />
+  );
+});
+
+TransparentImage.displayName = 'TransparentImage';
+
+const MotionTransparentImage = motion(TransparentImage);
 
 // --- Types ---
 
@@ -79,9 +150,11 @@ const Header = ({ onShowAbout, onLogout, showLogout, saveStatus, onRetry, errorD
 }) => (
   <header className="h-20 flex items-center justify-between px-6 bg-white border-b border-orange-50 sticky top-0 z-50 rounded-b-[2rem] shadow-sm">
     <div className="flex items-center gap-3">
-      <div className="w-10 h-10 bg-orange-400 flex items-center justify-center rounded-2xl shadow-lg shadow-orange-100 bounce-animation">
-        <ShieldCheck className="w-6 h-6 text-white" />
-      </div>
+      <TransparentImage 
+        src={appLogo} 
+        alt="AllerScan logo" 
+        className="w-12 h-12 object-contain bounce-animation"
+      />
       <div className="flex flex-col max-w-[150px] sm:max-w-none">
         <h1 className="text-2xl font-bold tracking-tight text-slate-800 leading-none">AllerScan</h1>
         <AnimatePresence mode="wait">
@@ -272,21 +345,30 @@ export default function App() {
 
   const saveData = async (p: Profile[], h: ProductLog[]) => {
     setSaveStatus('saving');
+    setErrorDetails(null);
     try {
       const res = await fetch('/api/data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profiles: p, history: h })
       });
+      
+      const contentType = res.headers.get('content-type');
+      let data;
+      if (contentType && contentType.includes('application/json')) {
+        data = await res.json();
+      }
+
       if (res.ok) {
         setSaveStatus('saved');
-        // Keep "Saved" status for a bit
         setTimeout(() => setSaveStatus('idle'), 2000);
       } else {
         setSaveStatus('error');
+        setErrorDetails(data?.message || data?.error || `Server Error (${res.status})`);
       }
-    } catch (error) {
+    } catch (error: any) {
       setSaveStatus('error');
+      setErrorDetails(error.message || String(error));
       console.error("Failed to save data:", error);
     }
   };
@@ -602,7 +684,7 @@ export default function App() {
 
   const LoginView = () => (
     <div className="flex flex-col items-center justify-center min-h-[70vh] p-6 relative">
-      <motion.div 
+      <MotionTransparentImage 
         initial={{ scale: 0.8, opacity: 0, rotate: -20 }}
         animate={{ scale: 1, opacity: 1, rotate: 0 }}
         transition={{ 
@@ -610,10 +692,10 @@ export default function App() {
           type: 'spring', 
           bounce: 0.6 
         }}
-        className="w-24 h-24 bg-orange-400 text-white rounded-[2rem] flex items-center justify-center mb-10 shadow-xl shadow-orange-100"
-      >
-        <ShieldCheck className="w-12 h-12" />
-      </motion.div>
+        src={appLogo}
+        alt="AllerScan Logo"
+        className="w-56 h-56 object-contain mb-8"
+      />
       <h2 className="text-4xl font-bold text-slate-800 mb-3">Hi there!</h2>
       <p className="text-lg font-medium text-slate-400 mb-12">Who's checking today?</p>
       
@@ -1043,7 +1125,11 @@ export default function App() {
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-8">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowAbout(false)} className="absolute inset-0 bg-slate-900/60 backdrop-blur-md" />
             <motion.div initial={{ scale: 0.9, opacity: 0, y: 30 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.9, opacity: 0, y: 30 }} className="bg-white rounded-[3.5rem] w-full max-w-sm p-12 shadow-3xl relative z-10 border-8 border-sky-50 text-center">
-              <div className="w-20 h-20 bg-orange-400 flex items-center justify-center rounded-[2rem] mx-auto mb-10 text-white shadow-xl shadow-orange-100 bouncy"><ShieldCheck className="w-10 h-10" /></div>
+              <TransparentImage 
+                src={appLogo} 
+                alt="AllerScan Logo" 
+                className="w-28 h-28 object-contain mx-auto mb-10 bouncy"
+              />
               <h3 className="text-3xl font-bold text-slate-800 mb-6 font-sans">Hello! Welcome!</h3>
               <p className="text-slate-400 font-bold mb-8 uppercase tracking-widest text-xs">We help you find what's making your tummy feel funny.</p>
               <button onClick={() => setShowAbout(false)} className="w-full bg-orange-400 text-white font-bold py-6 rounded-[2.5rem] shadow-xl bouncy uppercase tracking-widest">Let's Go!</button>
