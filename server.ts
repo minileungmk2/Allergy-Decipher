@@ -1,10 +1,17 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { kv } from "@vercel/kv";
+import { createClient } from "@vercel/kv";
 import dotenv from "dotenv";
 
 dotenv.config();
+
+// WARNING: Hardcoding credentials is insecure. 
+// Replace these placeholders with your actual Vercel KV credentials.
+const kv = createClient({
+  url: process.env.KV_REST_API_URL || "https://modest-bison-130262.upstash.io",
+  token: process.env.KV_REST_API_TOKEN || "gQAAAAAAAfzWAAIgcDJkMjk2Zjk3YWQ2ZGE0OTJiYjJlY2I5NjFjNTVlZjM1NA",
+});
 
 async function startServer() {
   const app = express();
@@ -14,10 +21,6 @@ async function startServer() {
 
   // API routes
   app.get("/api/data", async (req, res) => {
-    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
-      console.warn("Vercel KV not configured. Using empty data.");
-      return res.json({ profiles: [], history: [] });
-    }
     try {
       const profiles = await kv.get("allerscan_profiles") || [];
       const history = await kv.get("allerscan_history") || [];
@@ -29,10 +32,6 @@ async function startServer() {
   });
 
   app.post("/api/data", async (req, res) => {
-    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
-      console.warn("Vercel KV not configured. Cannot save data.");
-      return res.status(400).json({ error: "KV not configured" });
-    }
     try {
       const { profiles, history } = req.body;
       if (profiles) await kv.set("allerscan_profiles", profiles);

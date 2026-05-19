@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   ShieldCheck, 
   Barcode, 
@@ -69,13 +69,27 @@ const INITIAL_PROFILES: Profile[] = [
 
 // --- Sub-components ---
 
-const Header = ({ onShowAbout, onLogout, showLogout }: { onShowAbout: () => void, onLogout: () => void, showLogout: boolean }) => (
+const Header = ({ onShowAbout, onLogout, showLogout, isSaving }: { onShowAbout: () => void, onLogout: () => void, showLogout: boolean, isSaving: boolean }) => (
   <header className="h-20 flex items-center justify-between px-6 bg-white border-b border-orange-50 sticky top-0 z-50 rounded-b-[2rem] shadow-sm">
     <div className="flex items-center gap-3">
       <div className="w-10 h-10 bg-orange-400 flex items-center justify-center rounded-2xl shadow-lg shadow-orange-100 bounce-animation">
         <ShieldCheck className="w-6 h-6 text-white" />
       </div>
-      <h1 className="text-2xl font-bold tracking-tight text-slate-800">AllerScan</h1>
+      <div className="flex flex-col">
+        <h1 className="text-2xl font-bold tracking-tight text-slate-800 leading-none">AllerScan</h1>
+        <AnimatePresence>
+          {isSaving && (
+            <motion.span 
+              initial={{ opacity: 0, y: -5 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -5 }}
+              className="text-[10px] font-black text-sky-400 uppercase tracking-tighter mt-1"
+            >
+              Syncing...
+            </motion.span>
+          )}
+        </AnimatePresence>
+      </div>
     </div>
     <div className="flex items-center gap-4">
       {showLogout && (
@@ -145,6 +159,7 @@ export default function App() {
   // --- Handlers ---
 
   const [isDataLoaded, setIsDataLoaded] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   // --- Persistence Handlers ---
 
@@ -153,7 +168,15 @@ export default function App() {
       const response = await fetch('/api/data');
       if (response.ok) {
         const data = await response.json();
-        if (data.profiles && data.profiles.length > 0) setProfiles(data.profiles);
+        // Only override if data exists in KV
+        if (data.profiles && Array.isArray(data.profiles)) {
+          // If profiles was saved as empty, we still want to set it
+          // but if it's the first time (null/undefined in KV), we keep defaults
+          // Actually server returns [] if KV is empty, but we might want to distinguish
+          if (data.profiles.length > 0) {
+            setProfiles(data.profiles);
+          }
+        }
         if (data.history) setHistory(data.history);
       }
     } catch (error) {
@@ -164,6 +187,7 @@ export default function App() {
   };
 
   const saveData = async (p: Profile[], h: ProductLog[]) => {
+    setIsSaving(true);
     try {
       await fetch('/api/data', {
         method: 'POST',
@@ -172,6 +196,9 @@ export default function App() {
       });
     } catch (error) {
       console.error("Failed to save data:", error);
+    } finally {
+      // Small delay to make the "Saving" feel real and not just a flicker
+      setTimeout(() => setIsSaving(false), 800);
     }
   };
 
@@ -397,9 +424,9 @@ export default function App() {
     safeLogs.forEach(log => log.ingredientsList.forEach(ing => safeIngredients.add(ing)));
 
     const suspectCounts: Record<string, number> = {};
-    reactedLogs.forEach(log => {
-      const uniqueIng = [...new Set(log.ingredientsList)];
-      uniqueIng.forEach(ing => {
+    reactedLogs.forEach((log: ProductLog) => {
+      const uniqueIng = Array.from(new Set(log.ingredientsList));
+      uniqueIng.forEach((ing: string) => {
         if (!safeIngredients.has(ing)) {
           suspectCounts[ing] = (suspectCounts[ing] || 0) + 1;
         }
@@ -630,10 +657,10 @@ export default function App() {
                 type="text" 
                 placeholder="Or type the code here" 
                 className="flex-1 bg-slate-50 border-2 border-slate-100 rounded-3xl px-8 py-5 text-lg font-bold text-slate-700 outline-none transition-all placeholder:text-slate-200" 
-                onKeyDown={(e) => { if (e.key === 'Enter') fetchProduct((e.target as HTMLInputElement).value); }} 
+                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') fetchProduct((e.target as HTMLInputElement).value); }} 
               />
               <button 
-                onClick={() => { const val = (document.getElementById('manual-input') as HTMLInputElement).value; if (val) fetchProduct(val); }} 
+                onClick={() => { const el = document.getElementById('manual-input') as HTMLInputElement; if (el && el.value) fetchProduct(el.value); }} 
                 className="bg-sky-500 text-white p-5 rounded-3xl shadow-xl bouncy"
               >
                 <Search className="w-7 h-7" />
@@ -766,7 +793,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FFF9F5] font-sans selection:bg-orange-100 text-slate-800 overflow-x-hidden">
-      <Header onShowAbout={() => setShowAbout(true)} onLogout={handleLogout} showLogout={activeTab !== 'login'} />
+      <Header onShowAbout={() => setShowAbout(true)} onLogout={handleLogout} showLogout={activeTab !== 'login'} isSaving={isSaving} />
       <main className="max-w-xl mx-auto p-6 pb-36">
         <AnimatePresence mode="wait">
           {activeTab === 'login' && <motion.div key="login" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><LoginView /></motion.div>}
