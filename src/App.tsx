@@ -138,6 +138,24 @@ export default function App() {
   const [showManualAdd, setShowManualAdd] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
   const [analysisResults, setAnalysisResults] = useState<SuspectIngredient[]>([]);
+  const [longPressedId, setLongPressedId] = useState<string | null>(null);
+  const longPressTimer = useRef<NodeJS.Timeout | null>(null);
+
+  const startLongPress = (id: string) => {
+    longPressTimer.current = setTimeout(() => {
+      setLongPressedId(id);
+      if (typeof window !== 'undefined' && window.navigator && window.navigator.vibrate) {
+        window.navigator.vibrate(50);
+      }
+    }, 600);
+  };
+
+  const cancelLongPress = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
 
   // Profile Editor State
   const [editName, setEditName] = useState('');
@@ -240,14 +258,20 @@ export default function App() {
     setEditImage('');
   };
 
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
   const handleDeleteProfile = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (confirm('Are you sure you want to delete this profile?')) {
-      const newProfiles = profiles.filter(p => p.id !== id);
-      setProfiles(newProfiles);
-      setHistory(history.filter(h => h.profileId !== id));
-      if (activeProfile?.id === id) handleLogout();
-    }
+    setConfirmDeleteId(id);
+  };
+
+  const confirmDelete = () => {
+    if (!confirmDeleteId) return;
+    const newProfiles = profiles.filter(p => p.id !== confirmDeleteId);
+    setProfiles(newProfiles);
+    setHistory(history.filter(h => h.profileId !== confirmDeleteId));
+    if (activeProfile?.id === confirmDeleteId) handleLogout();
+    setConfirmDeleteId(null);
   };
 
   const handleUpdateProfile = () => {
@@ -483,51 +507,87 @@ export default function App() {
       
       <div className="grid grid-cols-2 gap-6 w-full max-w-sm mb-12">
         {profiles.map(profile => (
-          <motion.div
-            key={profile.id}
-            layout
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="relative group"
-          >
-            <motion.button
-              whileHover={{ y: -8, scale: 1.02 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => handleLogin(profile)}
-              className="w-full bg-white p-8 rounded-[2.5rem] border-2 border-slate-50 flex flex-col items-center gap-4 shadow-xl shadow-slate-100 transition-all relative overflow-hidden"
+            <motion.div
+              key={profile.id}
+              layout
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="relative group"
+              onTouchStart={() => startLongPress(profile.id)}
+              onTouchEnd={cancelLongPress}
+              onContextMenu={(e) => {
+                if (window.innerWidth < 768) e.preventDefault();
+              }}
             >
-              <div className={`w-16 h-16 ${profile.color} rounded-[1.5rem] flex items-center justify-center text-3xl shadow-inner relative overflow-hidden`}>
-                {profile.image ? (
-                  <img src={profile.image} className="w-full h-full object-cover" alt={profile.name} />
-                ) : (
-                  <UserIcon className="w-8 h-8" />
-                )}
-              </div>
-              <span className="text-lg font-bold text-slate-700 truncate w-full text-center px-2">{profile.name}</span>
-            </motion.button>
-            
-            <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button 
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setEditingProfile(profile);
-                  setEditName(profile.name);
-                  setEditImage(profile.image || '');
+              <motion.button
+                whileHover={{ y: -8, scale: 1.02 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => {
+                  if (longPressedId === profile.id) {
+                    setLongPressedId(null);
+                  } else {
+                    handleLogin(profile);
+                  }
                 }}
-                className="p-2 bg-white/90 backdrop-blur-sm rounded-xl shadow-lg text-sky-500 hover:bg-sky-50 transition-colors"
-                title="Edit Friend"
+                className={`w-full bg-white p-8 rounded-[2.5rem] border-2 flex flex-col items-center gap-4 shadow-xl shadow-slate-100 transition-all relative overflow-hidden ${longPressedId === profile.id ? 'border-sky-200 ring-4 ring-sky-50' : 'border-slate-50'}`}
               >
-                <Pencil className="w-4 h-4" />
-              </button>
-              <button 
-                onClick={(e) => handleDeleteProfile(profile.id, e)}
-                className="p-2 bg-white/90 backdrop-blur-sm rounded-xl shadow-lg text-orange-500 hover:bg-orange-50 transition-colors"
-                title="Remove Friend"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-          </motion.div>
+                <div className={`w-16 h-16 ${profile.color} rounded-[1.5rem] flex items-center justify-center text-3xl shadow-inner relative overflow-hidden`}>
+                  {profile.image ? (
+                    <img src={profile.image} className="w-full h-full object-cover" alt={profile.name} />
+                  ) : (
+                    <UserIcon className="w-8 h-8" />
+                  )}
+                </div>
+                <span className="text-lg font-bold text-slate-700 truncate w-full text-center px-2">{profile.name}</span>
+              </motion.button>
+              
+              <AnimatePresence>
+                {(longPressedId === profile.id || (typeof window !== 'undefined' && window.innerWidth >= 768)) && (
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.8, y: 10 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.8, y: 10 }}
+                    className={`absolute top-3 right-3 flex gap-2 z-20 ${longPressedId === profile.id ? 'opacity-100' : 'opacity-0 md:group-hover:opacity-100'} transition-opacity`}
+                  >
+                    {longPressedId === profile.id && (
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setLongPressedId(null);
+                        }}
+                        className="p-3 bg-white shadow-xl rounded-2xl text-slate-400 hover:bg-slate-50 transition-colors border border-slate-50"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    )}
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setLongPressedId(null);
+                        setEditingProfile(profile);
+                        setEditName(profile.name);
+                        setEditImage(profile.image || '');
+                      }}
+                      className="p-3 bg-white shadow-xl rounded-2xl text-sky-500 hover:bg-sky-50 transition-colors border border-sky-50"
+                      title="Edit Friend"
+                    >
+                      <Pencil className="w-5 h-5" />
+                    </button>
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setLongPressedId(null);
+                        handleDeleteProfile(profile.id, e);
+                      }}
+                      className="p-3 bg-white shadow-xl rounded-2xl text-orange-500 hover:bg-orange-50 transition-colors border border-orange-50"
+                      title="Remove Friend"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </motion.div>
         ))}
       </div>
 
@@ -747,9 +807,9 @@ export default function App() {
                         setEditingLogId(item.id);
                         setEditLogNotes(item.notes || '');
                       }}
-                      className="ml-2 inline-flex items-center p-1 hover:bg-white/50 rounded-lg transition-colors"
+                      className="ml-2 inline-flex items-center p-2.5 bg-white/50 hover:bg-white rounded-xl transition-all shadow-sm border border-slate-100/50"
                     >
-                      <Pencil className="w-3 h-3" />
+                      <Pencil className="w-4 h-4 text-sky-500" />
                     </button>
                   </div>
                 ) : (
@@ -758,9 +818,9 @@ export default function App() {
                       setEditingLogId(item.id);
                       setEditLogNotes('');
                     }}
-                    className="text-xs font-bold text-slate-300 hover:text-sky-500 transition-colors self-start px-4 flex items-center gap-2"
+                    className="text-sm font-bold text-slate-400 hover:text-sky-500 transition-colors self-start px-4 py-2 bg-slate-50 rounded-xl flex items-center gap-2 border border-slate-100"
                   >
-                    <Plus className="w-3 h-3" /> Add note about how you felt
+                    <Plus className="w-4 h-4" /> Add note about how you felt
                   </button>
                 )}
               </motion.div>
@@ -781,9 +841,21 @@ export default function App() {
       {analysisResults.length > 0 && (
         <div className="space-y-8 animate-in fade-in slide-in-from-bottom-5">
            <h3 className="text-xl font-bold text-slate-800 px-6">Likely Culprits</h3>
-           <div className="bg-white rounded-[3rem] border border-slate-100 shadow-xl overflow-hidden">
+            <div className="bg-white rounded-[3rem] border border-slate-100 shadow-xl overflow-hidden">
              {analysisResults.map((suspect, idx) => (
-               <div key={idx} className="p-10 border-b last:border-0"><div className="flex justify-between items-end mb-6"><span className="text-2xl font-bold text-slate-800 capitalize">{suspect.ingredient}</span><span className="text-xs font-black text-slate-300">Seen {suspect.count} times ({suspect.percentage}%)</span></div><div className="w-full bg-slate-100 h-4 rounded-full overflow-hidden border-2 border-white shadow-inner"><motion.div initial={{ width: 0 }} animate={{ width: `${suspect.percentage}%` }} className={`h-full rounded-full ${suspect.percentage > 70 ? 'bg-orange-500' : 'bg-sky-400'}`} /></div></div>
+               <div key={idx} className="p-6 md:p-10 border-b last:border-0">
+                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-6 gap-2">
+                   <span className="text-xl md:text-2xl font-bold text-slate-800 capitalize">{suspect.ingredient}</span>
+                   <span className="text-[10px] md:text-xs font-black text-slate-300 uppercase tracking-widest">Seen {suspect.count} times ({suspect.percentage}%)</span>
+                 </div>
+                 <div className="w-full bg-slate-100 h-4 rounded-full overflow-hidden border-2 border-white shadow-inner">
+                   <motion.div 
+                     initial={{ width: 0 }} 
+                     animate={{ width: `${suspect.percentage}%` }} 
+                     className={`h-full rounded-full ${suspect.percentage > 70 ? 'bg-orange-500' : 'bg-sky-400'}`} 
+                   />
+                 </div>
+               </div>
              ))}
            </div>
         </div>
@@ -945,6 +1017,41 @@ export default function App() {
                     Save Note
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {confirmDeleteId && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-6">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setConfirmDeleteId(null)} className="absolute inset-0 bg-slate-900/60 backdrop-blur-md" />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 30 }} 
+              animate={{ scale: 1, opacity: 1, y: 0 }} 
+              exit={{ scale: 0.9, opacity: 0, y: 30 }} 
+              className="bg-white rounded-[3.5rem] w-full max-w-sm p-10 shadow-3xl relative z-10 border-8 border-orange-50 text-center"
+            >
+              <div className="w-20 h-20 bg-orange-50 text-orange-500 rounded-[2rem] flex items-center justify-center mx-auto mb-8">
+                <Trash2 className="w-10 h-10" />
+              </div>
+              <h3 className="text-2xl font-bold text-slate-800 mb-4 uppercase tracking-tight">Remove Friend?</h3>
+              <p className="text-slate-400 font-bold mb-10 text-sm">This will delete all their yummy logs too. You can't undo this!</p>
+              
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => setConfirmDeleteId(null)}
+                  className="flex-1 bg-slate-100 text-slate-400 font-bold py-5 rounded-3xl"
+                >
+                  No, Keep!
+                </button>
+                <button 
+                  onClick={confirmDelete}
+                  className="flex-[2] bg-orange-500 text-white font-bold py-5 rounded-3xl shadow-xl shadow-orange-100 bouncy"
+                >
+                  Yes, Remove
+                </button>
               </div>
             </motion.div>
           </div>
