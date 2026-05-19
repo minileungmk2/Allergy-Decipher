@@ -22,8 +22,9 @@ async function startServer() {
   // API routes
   app.get("/api/data", async (req, res) => {
     try {
-      const profiles = await kv.get("allerscan_profiles") || [];
-      const history = await kv.get("allerscan_history") || [];
+      const profiles = await kv.get("allerscan_profiles");
+      const history = await kv.get("allerscan_history");
+      console.log(`[KV Fetch] Profiles: ${profiles ? (profiles as any[]).length : 'null'}, History: ${history ? (history as any[]).length : 'null'}`);
       res.json({ profiles, history });
     } catch (error) {
       console.error("KV fetch error:", error);
@@ -34,8 +35,14 @@ async function startServer() {
   app.post("/api/data", async (req, res) => {
     try {
       const { profiles, history } = req.body;
-      if (profiles) await kv.set("allerscan_profiles", profiles);
-      if (history) await kv.set("allerscan_history", history);
+      if (profiles !== undefined) {
+        await kv.set("allerscan_profiles", profiles);
+        console.log(`[KV Save] Profiles updated: ${profiles.length}`);
+      }
+      if (history !== undefined) {
+        await kv.set("allerscan_history", history);
+        console.log(`[KV Save] History updated: ${history.length}`);
+      }
       res.json({ status: "ok" });
     } catch (error) {
       console.error("KV save error:", error);

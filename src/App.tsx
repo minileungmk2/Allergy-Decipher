@@ -186,16 +186,23 @@ export default function App() {
       const response = await fetch('/api/data');
       if (response.ok) {
         const data = await response.json();
-        // Only override if data exists in KV
-        if (data.profiles && Array.isArray(data.profiles)) {
-          // If profiles was saved as empty, we still want to set it
-          // but if it's the first time (null/undefined in KV), we keep defaults
-          // Actually server returns [] if KV is empty, but we might want to distinguish
-          if (data.profiles.length > 0) {
-            setProfiles(data.profiles);
-          }
+        console.log("Data fetched from KV:", data);
+        
+        // If kv returns null, it means no data has ever been saved
+        // If it returns an array (even empty), we should use it
+        if (data.profiles !== null && Array.isArray(data.profiles)) {
+          console.log("Loading profiles from KV:", data.profiles.length);
+          setProfiles(data.profiles);
+        } else {
+          console.log("No profiles in KV, keeping defaults.");
         }
-        if (data.history) setHistory(data.history);
+        
+        if (data.history !== null && Array.isArray(data.history)) {
+          console.log("Loading history from KV:", data.history.length);
+          setHistory(data.history);
+        }
+      } else {
+        console.error("Server returned error when fetching data:", response.status);
       }
     } catch (error) {
       console.error("Failed to fetch data:", error);
