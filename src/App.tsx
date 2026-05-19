@@ -69,7 +69,7 @@ const INITIAL_PROFILES: Profile[] = [
 
 // --- Sub-components ---
 
-const Header = ({ onShowAbout, onLogout, showLogout, saveStatus }: { onShowAbout: () => void, onLogout: () => void, showLogout: boolean, saveStatus: 'idle' | 'saving' | 'saved' | 'error' }) => (
+const Header = ({ onShowAbout, onLogout, showLogout, saveStatus, onRetry }: { onShowAbout: () => void, onLogout: () => void, showLogout: boolean, saveStatus: 'idle' | 'saving' | 'saved' | 'error', onRetry?: () => void }) => (
   <header className="h-20 flex items-center justify-between px-6 bg-white border-b border-orange-50 sticky top-0 z-50 rounded-b-[2rem] shadow-sm">
     <div className="flex items-center gap-3">
       <div className="w-10 h-10 bg-orange-400 flex items-center justify-center rounded-2xl shadow-lg shadow-orange-100 bounce-animation">
@@ -84,7 +84,7 @@ const Header = ({ onShowAbout, onLogout, showLogout, saveStatus }: { onShowAbout
               initial={{ opacity: 0, y: -5 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -5 }}
-              className="text-[10px] font-black text-sky-400 uppercase tracking-tighter mt-1"
+              className="text-[10px] font-black text-sky-500 uppercase tracking-tighter mt-1"
             >
               Syncing...
             </motion.span>
@@ -95,21 +95,19 @@ const Header = ({ onShowAbout, onLogout, showLogout, saveStatus }: { onShowAbout
               initial={{ opacity: 0, y: -5 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -5 }}
-              className="text-[10px] font-black text-emerald-400 uppercase tracking-tighter mt-1"
+              className="text-[10px] font-black text-emerald-500 uppercase tracking-tighter mt-1"
             >
               Synced!
             </motion.span>
           )}
           {saveStatus === 'error' && (
-            <motion.span 
+            <button 
               key="error"
-              initial={{ opacity: 0, y: -5 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -5 }}
-              className="text-[10px] font-black text-orange-400 uppercase tracking-tighter mt-1"
+              onClick={onRetry}
+              className="text-[10px] font-black text-orange-500 uppercase tracking-tighter mt-1 flex items-center gap-1 hover:bg-orange-50 rounded px-1 -ml-1 transition-colors"
             >
-              Sync Error
-            </motion.span>
+              Sync Error! Tap to retry
+            </button>
           )}
         </AnimatePresence>
       </div>
@@ -199,44 +197,55 @@ export default function App() {
 
   // --- Handlers ---
 
-  const [isDataLoaded, setIsDataLoaded] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-
-  // --- Persistence Handlers ---
-
-  const fetchData = async () => {
-    try {
-      const response = await fetch('/api/data', {
-        headers: { 'Cache-Control': 'no-cache' }
-      });
-      if (response.ok) {
-        const data = await response.json();
-        console.log("Data fetched from KV:", data);
-        
-        if (data.profiles !== null && Array.isArray(data.profiles)) {
-          // If the array is empty, it might mean the user deleted everything.
-          // However, for the very first time (new app), we show defaults.
-          // We can check if history is also null/empty to decide.
-          if (data.profiles.length === 0 && data.history === null) {
-            setProfiles(INITIAL_PROFILES);
-          } else {
-            setProfiles(data.profiles);
+    const [isDataLoaded, setIsDataLoaded] = useState(false);
+    const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+    const [fetchError, setFetchError] = useState(false);
+  
+    // --- Persistence Handlers ---
+  
+    const fetchData = async () => {
+      try {
+        setFetchError(false);
+        const response = await fetch(`/api/data?t=${Date.now()}`, {
+          headers: { 
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
           }
-        } else if (data.profiles === null) {
-          // Truly first time
-          setProfiles(INITIAL_PROFILES);
+        });
+        if (response.ok) {
+          const data = await response.json();
+          console.log("Data fetched from server:", data);
+          
+          let loadedProfiles = INITIAL_PROFILES;
+          let loadedHistory = [];
+
+          if (Array.isArray(data.profiles)) {
+            if (data.profiles.length === 0 && (data.history === null || (Array.isArray(data.history) && data.history.length === 0))) {
+              console.log("App looks new, or empty database.");
+            } else {
+              loadedProfiles = data.profiles;
+            }
+          } else if (data.profiles !== null && data.profiles !== undefined) {
+             // In case it's not an array but exists
+             console.warn("Profiles in KV is not an array:", data.profiles);
+          }
+  
+          if (Array.isArray(data.history)) {
+            loadedHistory = data.history;
+          }
+
+          setProfiles(loadedProfiles);
+          setHistory(loadedHistory);
+          setIsDataLoaded(true);
+        } else {
+          console.error("Server error during fetch", response.status);
+          setFetchError(true);
         }
-        
-        if (data.history !== null && Array.isArray(data.history)) {
-          setHistory(data.history);
-        }
+      } catch (error) {
+        console.error("Failed to fetch data:", error);
+        setFetchError(true);
       }
-    } catch (error) {
-      console.error("Failed to fetch data:", error);
-    } finally {
-      setIsDataLoaded(true);
-    }
-  };
+    };
 
   const saveData = async (p: Profile[], h: ProductLog[]) => {
     setSaveStatus('saving');
@@ -976,7 +985,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FFF9F5] font-sans selection:bg-orange-100 text-slate-800 overflow-x-hidden">
-      <Header onShowAbout={() => setShowAbout(true)} onLogout={handleLogout} showLogout={activeTab !== 'login'} saveStatus={saveStatus} />
+      <Header 
+        onShowAbout={() => setShowAbout(true)} 
+        onLogout={handleLogout} 
+        showLogout={activeTab !== 'login'} 
+        saveStatus={fetchError ? 'error' : saveStatus} 
+        onRetry={() => fetchError ? fetchData() : saveData(profiles, history)}
+      />
       <main className="max-w-xl mx-auto p-6 pb-36">
         <AnimatePresence mode="wait">
           {activeTab === 'login' && <motion.div key="login" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><LoginView /></motion.div>}

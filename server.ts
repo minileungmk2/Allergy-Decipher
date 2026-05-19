@@ -8,10 +8,25 @@ dotenv.config();
 
 // WARNING: Hardcoding credentials is insecure. 
 // Replace these placeholders with your actual Vercel KV credentials.
-const kv = createClient({
-  url: process.env.KV_REST_API_URL || "https://modest-bison-130262.upstash.io",
-  token: process.env.KV_REST_API_TOKEN || "gQAAAAAAAfzWAAIgcDJkMjk2Zjk3YWQ2ZGE0OTJiYjJlY2I5NjFjNTVlZjM1NA",
-});
+let kvClient: any = null;
+
+function getKV() {
+  if (!kvClient) {
+    const url = process.env.KV_REST_API_URL || "https://modest-bison-130262.upstash.io";
+    const token = process.env.KV_REST_API_TOKEN || "gQAAAAAAAfzWAAIgcDJkMjk2Zjk3YWQ2ZGE0OTJiYjJlY2I5NjFjNTVlZjM1NA";
+    
+    if (!url || !token || url.includes("PLACEHOLDER")) {
+      console.warn("KV credentials missing or placeholders used. Persistence will be limited.");
+      return null;
+    }
+    
+    kvClient = createClient({
+      url,
+      token,
+    });
+  }
+  return kvClient;
+}
 
 async function startServer() {
   const app = express();
@@ -22,9 +37,17 @@ async function startServer() {
   // API routes
   app.get("/api/data", async (req, res) => {
     try {
+      const kv = getKV();
+      if (!kv) {
+        return res.json({ profiles: null, history: null, warning: "KV not configured" });
+      }
+
+      const startTime = Date.now();
       const profiles = await kv.get("allerscan_profiles");
       const history = await kv.get("allerscan_history");
-      console.log(`[KV Fetch] Profiles: ${profiles ? (profiles as any[]).length : 'null'}, History: ${history ? (history as any[]).length : 'null'}`);
+      const duration = Date.now() - startTime;
+      
+      console.log(`[KV Fetch] Request took ${duration}ms`);
       res.json({ profiles, history });
     } catch (error) {
       console.error("KV fetch error:", error);
@@ -34,15 +57,24 @@ async function startServer() {
 
   app.post("/api/data", async (req, res) => {
     try {
+      const kv = getKV();
+      if (!kv) {
+        return res.status(503).json({ error: "KV storage not configured." });
+      }
+
       const { profiles, history } = req.body;
+      const startTime = Date.now();
+      
       if (profiles !== undefined) {
         await kv.set("allerscan_profiles", profiles);
-        console.log(`[KV Save] Profiles updated: ${profiles.length}`);
       }
       if (history !== undefined) {
         await kv.set("allerscan_history", history);
-        console.log(`[KV Save] History updated: ${history.length}`);
       }
+      
+      const duration = Date.now() - startTime;
+      console.log(`[KV Save] Request took ${duration}ms`);
+      
       res.json({ status: "ok" });
     } catch (error) {
       console.error("KV save error:", error);
