@@ -304,28 +304,67 @@ export default function App() {
     }
   };
 
-  const startScanner = async () => {
+  const [cameraError, setCameraError] = useState<string | null>(null);
+
+  const startScanner = async (retryCount = 0) => {
     if (scanner) return;
+    setCameraError(null);
+    
+    // Check if element is mounted via Ref
+    if (!scannerRef.current) {
+      if (retryCount < 15) {
+        setTimeout(() => startScanner(retryCount + 1), 150);
+      } else {
+        console.error("Scanner ref not found after retries");
+        setCameraError("Camera target not ready. Please try again.");
+      }
+      return;
+    }
+
     setScanning(true);
     setScannedProduct(null);
     
-    const newScanner = new Html5Qrcode("reader");
-    setScanner(newScanner);
-
     try {
+      // Use the ref element ID or the element itself if supported (ID is safer for this lib)
+      const elementId = scannerRef.current.id || "reader";
+      const newScanner = new Html5Qrcode(elementId);
+      setScanner(newScanner);
+
+      const cameras = await Html5Qrcode.getCameras().catch(() => []);
+      console.log("Cameras detected:", cameras);
+
+      const config = { 
+        fps: 15, 
+        qrbox: { width: 250, height: 150 },
+        // iOS Safari specifics:
+        videoConstraints: {
+          facingMode: "environment",
+          width: { min: 640, ideal: 1280, max: 1920 },
+          height: { min: 480, ideal: 720, max: 1080 }
+        }
+      };
+
       await newScanner.start(
         { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 150 } },
+        config,
         (decodedText) => {
           fetchProduct(decodedText);
-          newScanner.stop();
-          setScanner(null);
-          setScanning(false);
+          newScanner.stop().then(() => {
+            newScanner.clear(); // Clean up DOM
+            setScanner(null);
+            setScanning(false);
+          }).catch(err => console.error("Failed to stop scanner", err));
         },
-        () => {} // silent failure for frame check
+        () => {} 
       );
-    } catch (err) {
+    } catch (err: any) {
       console.error("Scanner failed to start", err);
+      let msg = "Failed to access camera.";
+      if (err?.message?.includes("Permission")) msg = "Camera permission denied.";
+      else if (err?.message?.includes("NotFound")) msg = "No camera found.";
+      else if (err?.message) msg = err.message;
+      
+      setCameraError(msg);
       setScanning(false);
       setScanner(null);
     }
@@ -333,7 +372,9 @@ export default function App() {
 
   const stopScanner = () => {
     if (scanner) {
-      scanner.stop().catch(() => {});
+      scanner.stop().then(() => {
+        scanner.clear();
+      }).catch(() => {});
       setScanner(null);
       setScanning(false);
     }
@@ -699,15 +740,46 @@ export default function App() {
              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 border-4 border-white/20 rounded-full"></div>
           </div>
           
-          <div id="reader" className="w-full h-full"></div>
+          <div id="reader" ref={scannerRef} className="w-full h-full"></div>
           
+          {cameraError && (
+             <div className="absolute inset-0 bg-white/95 flex flex-col items-center justify-center p-8 z-30 backdrop-blur-lg">
+               <div className="w-20 h-20 bg-orange-50 text-orange-500 rounded-[2rem] flex items-center justify-center mb-6">
+                 <AlertTriangle className="w-10 h-10" />
+               </div>
+               <h3 className="text-xl font-bold text-slate-800 mb-2">Camera Ouchie</h3>
+               <p className="text-sm text-slate-400 font-bold mb-8 text-center">{cameraError}</p>
+               <button 
+                 onClick={() => startScanner()}
+                 className="bg-sky-500 text-white font-bold px-10 py-4 rounded-3xl shadow-xl bouncy"
+               >
+                 Try Again
+               </button>
+             </div>
+          )}
+
           {loading && (
             <div className="absolute inset-0 bg-white/90 flex flex-col items-center justify-center gap-6 z-20 backdrop-blur-md">
               <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: 'linear' }} className="w-16 h-16 text-sky-500 rounded-full flex items-center justify-center"><Loader2 className="w-16 h-16" /></motion.div>
               <p className="text-xl font-bold text-slate-800">Finding yummy details...</p>
             </div>
           )}
-          {!scanning && !loading && !scannedProduct && (
+          {!scanning && !loading && !scannedProduct && !cameraError && (
+            <div className="absolute inset-0 bg-white/50 backdrop-blur-sm flex flex-col items-center justify-center gap-6 z-20">
+              <div className="w-20 h-20 bg-sky-50 text-sky-500 rounded-[2rem] flex items-center justify-center shadow-inner">
+                <Camera className="w-10 h-10" />
+              </div>
+              <button 
+                onClick={() => startScanner()}
+                className="bg-sky-500 text-white font-bold px-10 py-5 rounded-[2rem] shadow-2xl bouncy flex items-center gap-3"
+              >
+                <div className="w-2 h-2 bg-white rounded-full animate-ping" />
+                Open Magic Eye
+              </button>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center px-10">Sometimes the Eye needs a gentle poke to wake up</p>
+            </div>
+          )}
+          {!scanning && !loading && !scannedProduct && !cameraError && (
             <div className="text-slate-300 text-center p-12 absolute z-0 pointer-events-none">
               <Camera className="w-20 h-20 mx-auto mb-8 opacity-10" />
               <p className="text-lg font-bold">Wake up the Magic Eye!</p>
