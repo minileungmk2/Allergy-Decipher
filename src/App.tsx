@@ -69,7 +69,7 @@ const INITIAL_PROFILES: Profile[] = [
 
 // --- Sub-components ---
 
-const Header = ({ onShowAbout, onLogout, showLogout, isSaving }: { onShowAbout: () => void, onLogout: () => void, showLogout: boolean, isSaving: boolean }) => (
+const Header = ({ onShowAbout, onLogout, showLogout, saveStatus }: { onShowAbout: () => void, onLogout: () => void, showLogout: boolean, saveStatus: 'idle' | 'saving' | 'saved' | 'error' }) => (
   <header className="h-20 flex items-center justify-between px-6 bg-white border-b border-orange-50 sticky top-0 z-50 rounded-b-[2rem] shadow-sm">
     <div className="flex items-center gap-3">
       <div className="w-10 h-10 bg-orange-400 flex items-center justify-center rounded-2xl shadow-lg shadow-orange-100 bounce-animation">
@@ -77,15 +77,38 @@ const Header = ({ onShowAbout, onLogout, showLogout, isSaving }: { onShowAbout: 
       </div>
       <div className="flex flex-col">
         <h1 className="text-2xl font-bold tracking-tight text-slate-800 leading-none">AllerScan</h1>
-        <AnimatePresence>
-          {isSaving && (
+        <AnimatePresence mode="wait">
+          {saveStatus === 'saving' && (
             <motion.span 
+              key="saving"
               initial={{ opacity: 0, y: -5 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -5 }}
               className="text-[10px] font-black text-sky-400 uppercase tracking-tighter mt-1"
             >
               Syncing...
+            </motion.span>
+          )}
+          {saveStatus === 'saved' && (
+            <motion.span 
+              key="saved"
+              initial={{ opacity: 0, y: -5 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -5 }}
+              className="text-[10px] font-black text-emerald-400 uppercase tracking-tighter mt-1"
+            >
+              Synced!
+            </motion.span>
+          )}
+          {saveStatus === 'error' && (
+            <motion.span 
+              key="error"
+              initial={{ opacity: 0, y: -5 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -5 }}
+              className="text-[10px] font-black text-orange-400 uppercase tracking-tighter mt-1"
+            >
+              Sync Error
             </motion.span>
           )}
         </AnimatePresence>
@@ -177,32 +200,36 @@ export default function App() {
   // --- Handlers ---
 
   const [isDataLoaded, setIsDataLoaded] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   // --- Persistence Handlers ---
 
   const fetchData = async () => {
     try {
-      const response = await fetch('/api/data');
+      const response = await fetch('/api/data', {
+        headers: { 'Cache-Control': 'no-cache' }
+      });
       if (response.ok) {
         const data = await response.json();
         console.log("Data fetched from KV:", data);
         
-        // If kv returns null, it means no data has ever been saved
-        // If it returns an array (even empty), we should use it
         if (data.profiles !== null && Array.isArray(data.profiles)) {
-          console.log("Loading profiles from KV:", data.profiles.length);
-          setProfiles(data.profiles);
-        } else {
-          console.log("No profiles in KV, keeping defaults.");
+          // If the array is empty, it might mean the user deleted everything.
+          // However, for the very first time (new app), we show defaults.
+          // We can check if history is also null/empty to decide.
+          if (data.profiles.length === 0 && data.history === null) {
+            setProfiles(INITIAL_PROFILES);
+          } else {
+            setProfiles(data.profiles);
+          }
+        } else if (data.profiles === null) {
+          // Truly first time
+          setProfiles(INITIAL_PROFILES);
         }
         
         if (data.history !== null && Array.isArray(data.history)) {
-          console.log("Loading history from KV:", data.history.length);
           setHistory(data.history);
         }
-      } else {
-        console.error("Server returned error when fetching data:", response.status);
       }
     } catch (error) {
       console.error("Failed to fetch data:", error);
@@ -212,18 +239,23 @@ export default function App() {
   };
 
   const saveData = async (p: Profile[], h: ProductLog[]) => {
-    setIsSaving(true);
+    setSaveStatus('saving');
     try {
-      await fetch('/api/data', {
+      const res = await fetch('/api/data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profiles: p, history: h })
       });
+      if (res.ok) {
+        setSaveStatus('saved');
+        // Keep "Saved" status for a bit
+        setTimeout(() => setSaveStatus('idle'), 2000);
+      } else {
+        setSaveStatus('error');
+      }
     } catch (error) {
+      setSaveStatus('error');
       console.error("Failed to save data:", error);
-    } finally {
-      // Small delay to make the "Saving" feel real and not just a flicker
-      setTimeout(() => setIsSaving(false), 800);
     }
   };
 
@@ -237,7 +269,7 @@ export default function App() {
     if (!isDataLoaded) return;
     const timeout = setTimeout(() => {
       saveData(profiles, history);
-    }, 1500);
+    }, 800); // Faster debounce for better mobile feel
     return () => clearTimeout(timeout);
   }, [profiles, history, isDataLoaded]);
 
@@ -944,7 +976,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FFF9F5] font-sans selection:bg-orange-100 text-slate-800 overflow-x-hidden">
-      <Header onShowAbout={() => setShowAbout(true)} onLogout={handleLogout} showLogout={activeTab !== 'login'} isSaving={isSaving} />
+      <Header onShowAbout={() => setShowAbout(true)} onLogout={handleLogout} showLogout={activeTab !== 'login'} saveStatus={saveStatus} />
       <main className="max-w-xl mx-auto p-6 pb-36">
         <AnimatePresence mode="wait">
           {activeTab === 'login' && <motion.div key="login" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}><LoginView /></motion.div>}
