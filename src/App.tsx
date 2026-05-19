@@ -69,13 +69,20 @@ const INITIAL_PROFILES: Profile[] = [
 
 // --- Sub-components ---
 
-const Header = ({ onShowAbout, onLogout, showLogout, saveStatus, onRetry }: { onShowAbout: () => void, onLogout: () => void, showLogout: boolean, saveStatus: 'idle' | 'saving' | 'saved' | 'error', onRetry?: () => void }) => (
+const Header = ({ onShowAbout, onLogout, showLogout, saveStatus, onRetry, errorDetails }: { 
+  onShowAbout: () => void, 
+  onLogout: () => void, 
+  showLogout: boolean, 
+  saveStatus: 'idle' | 'saving' | 'saved' | 'error', 
+  onRetry?: () => void,
+  errorDetails?: string | null
+}) => (
   <header className="h-20 flex items-center justify-between px-6 bg-white border-b border-orange-50 sticky top-0 z-50 rounded-b-[2rem] shadow-sm">
     <div className="flex items-center gap-3">
       <div className="w-10 h-10 bg-orange-400 flex items-center justify-center rounded-2xl shadow-lg shadow-orange-100 bounce-animation">
         <ShieldCheck className="w-6 h-6 text-white" />
       </div>
-      <div className="flex flex-col">
+      <div className="flex flex-col max-w-[150px] sm:max-w-none">
         <h1 className="text-2xl font-bold tracking-tight text-slate-800 leading-none">AllerScan</h1>
         <AnimatePresence mode="wait">
           {saveStatus === 'saving' && (
@@ -104,9 +111,10 @@ const Header = ({ onShowAbout, onLogout, showLogout, saveStatus, onRetry }: { on
             <button 
               key="error"
               onClick={onRetry}
-              className="text-[10px] font-black text-orange-500 uppercase tracking-tighter mt-1 flex items-center gap-1 hover:bg-orange-50 rounded px-1 -ml-1 transition-colors"
+              className="text-[10px] font-black text-orange-500 uppercase tracking-tighter mt-1 flex flex-col items-start gap-0.5 hover:bg-orange-50 rounded px-1 -ml-1 transition-colors"
             >
-              Sync Error! Tap to retry
+              <span>Sync Error! Tap to retry</span>
+              {errorDetails && <span className="text-[8px] normal-case text-orange-400 truncate w-full">{errorDetails}</span>}
             </button>
           )}
         </AnimatePresence>
@@ -200,12 +208,14 @@ export default function App() {
     const [isDataLoaded, setIsDataLoaded] = useState(false);
     const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [fetchError, setFetchError] = useState(false);
+    const [errorDetails, setErrorDetails] = useState<string | null>(null);
   
     // --- Persistence Handlers ---
   
     const fetchData = async () => {
       try {
         setFetchError(false);
+        setErrorDetails(null);
         const response = await fetch(`/api/data?t=${Date.now()}`, {
           headers: { 
             'Cache-Control': 'no-cache',
@@ -240,11 +250,12 @@ export default function App() {
         } else {
           console.error("Server error during fetch", response.status, data);
           setFetchError(true);
-          // Optional: show a toast or alert with data.message
+          setErrorDetails(data.message || data.error || `Status: ${response.status}`);
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error("Failed to fetch data:", error);
         setFetchError(true);
+        setErrorDetails(error.message || String(error));
       }
     };
 
@@ -992,6 +1003,7 @@ export default function App() {
         showLogout={activeTab !== 'login'} 
         saveStatus={fetchError ? 'error' : saveStatus} 
         onRetry={() => fetchError ? fetchData() : saveData(profiles, history)}
+        errorDetails={errorDetails}
       />
       <main className="max-w-xl mx-auto p-6 pb-36">
         <AnimatePresence mode="wait">

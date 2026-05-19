@@ -16,8 +16,8 @@ function getKV() {
     const fallbackUrl = "https://modest-bison-130262.upstash.io";
     const fallbackToken = "gQAAAAAAAfzWAAIgcDJkMjk2Zjk3YWQ2ZGE0OTJiYjJlY2I5NjFjNTVlZjM1NA";
 
-    let url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
-    let token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+    let url = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "").trim();
+    let token = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 
     // Special case for AI Studio users who might paste the full rediss:// URL in KV_URL
     if (!url && process.env.KV_URL && process.env.KV_URL.startsWith("https")) {
@@ -25,7 +25,7 @@ function getKV() {
     }
 
     // If env vars are missing or placeholders, use your hardcoded ones
-    if (!url || url.includes("<YOUR") || url.includes("PLACEHOLDER")) {
+    if (!url || url.includes("<YOUR") || url.includes("PLACEHOLDER") || url.startsWith("rediss://")) {
       url = fallbackUrl;
     }
     if (!token || token.includes("<YOUR") || token.includes("PLACEHOLDER")) {
