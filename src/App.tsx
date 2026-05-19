@@ -212,8 +212,9 @@ export default function App() {
             'Pragma': 'no-cache'
           }
         });
+        const data = await response.json();
+        
         if (response.ok) {
-          const data = await response.json();
           console.log("Data fetched from server:", data);
           
           let loadedProfiles = INITIAL_PROFILES;
@@ -226,7 +227,6 @@ export default function App() {
               loadedProfiles = data.profiles;
             }
           } else if (data.profiles !== null && data.profiles !== undefined) {
-             // In case it's not an array but exists
              console.warn("Profiles in KV is not an array:", data.profiles);
           }
   
@@ -238,8 +238,9 @@ export default function App() {
           setHistory(loadedHistory);
           setIsDataLoaded(true);
         } else {
-          console.error("Server error during fetch", response.status);
+          console.error("Server error during fetch", response.status, data);
           setFetchError(true);
+          // Optional: show a toast or alert with data.message
         }
       } catch (error) {
         console.error("Failed to fetch data:", error);

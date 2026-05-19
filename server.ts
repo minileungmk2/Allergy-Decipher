@@ -16,8 +16,13 @@ function getKV() {
     const fallbackUrl = "https://modest-bison-130262.upstash.io";
     const fallbackToken = "gQAAAAAAAfzWAAIgcDJkMjk2Zjk3YWQ2ZGE0OTJiYjJlY2I5NjFjNTVlZjM1NA";
 
-    let url = process.env.KV_REST_API_URL;
-    let token = process.env.KV_REST_API_TOKEN;
+    let url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+    let token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+
+    // Special case for AI Studio users who might paste the full rediss:// URL in KV_URL
+    if (!url && process.env.KV_URL && process.env.KV_URL.startsWith("https")) {
+      url = process.env.KV_URL;
+    }
 
     // If env vars are missing or placeholders, use your hardcoded ones
     if (!url || url.includes("<YOUR") || url.includes("PLACEHOLDER")) {
@@ -46,7 +51,27 @@ async function startServer() {
 
   app.use(express.json({ limit: '10mb' }));
 
-  // API routes
+// API routes
+  app.get("/api/debug-kv", async (req, res) => {
+    try {
+      const kv = getKV();
+      if (!kv) return res.json({ status: "error", message: "KV not initialized (checks failed)" });
+      
+      const start = Date.now();
+      await kv.set("allerscan_test_ping", Date.now());
+      const val = await kv.get("allerscan_test_ping");
+      return res.json({ 
+        status: "success", 
+        latency: Date.now() - start, 
+        val,
+        env_url: !!process.env.KV_REST_API_URL,
+        env_token: !!process.env.KV_REST_API_TOKEN
+      });
+    } catch (e: any) {
+      return res.status(500).json({ status: "error", message: e.message, stack: e.stack });
+    }
+  });
+
   app.get("/api/data", async (req, res) => {
     console.log("[API] GET /api/data - Request received");
     try {
@@ -70,7 +95,12 @@ async function startServer() {
       res.json({ profiles, history });
     } catch (error: any) {
       console.error("KV fetch critical error:", error);
-      res.status(500).json({ error: "Failed to fetch data from KV.", message: error?.message, stack: error?.stack });
+      res.status(500).json({ 
+        error: "Failed to fetch data from KV.", 
+        message: error?.message, 
+        code: error?.code,
+        details: typeof error === 'object' ? JSON.stringify(error) : String(error)
+      });
     }
   });
 
