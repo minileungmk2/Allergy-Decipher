@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { Redis } from "@upstash/redis";
 import dotenv from "dotenv";
@@ -45,10 +46,10 @@ function getKV() {
   return kvClient;
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export const app = express();
+const PORT = 3000;
 
+async function setupApp() {
   app.use(express.json({ limit: '10mb' }));
 
 // API routes
@@ -73,11 +74,11 @@ async function startServer() {
   });
 
   app.get("/api/data", async (req, res) => {
-    console.log("[API] GET /api/data - Request received");
+    console.log(`[${new Date().toISOString()}] GET /api/data`);
     try {
       const kv = getKV();
       if (!kv) {
-        console.warn("[API] KV not configured in GET /api/data - url or token missing");
+        console.warn("[API] KV not configured (no URL/token)");
         return res.json({ profiles: null, history: null, warning: "KV not configured" });
       }
 
@@ -85,27 +86,26 @@ async function startServer() {
       console.log("[API] KV: Starting fetch...");
       
       const [profiles, history] = await Promise.all([
-        kv.get("allerscan_profiles").catch(e => { console.error("Error fetching profiles:", e); return null; }),
-        kv.get("allerscan_history").catch(e => { console.error("Error fetching history:", e); return null; })
+        kv.get("allerscan_profiles").catch((e: any) => { console.error("Error fetching profiles:", e); throw e; }),
+        kv.get("allerscan_history").catch((e: any) => { console.error("Error fetching history:", e); throw e; })
       ]);
       
       const duration = Date.now() - startTime;
-      console.log(`[KV Fetch] Completed in ${duration}ms. Profiles exists: ${!!profiles}`);
+      console.log(`[KV Fetch] Completed in ${duration}ms. Profiles: ${profiles ? 'found' : 'missing'}`);
       
       res.json({ profiles, history });
     } catch (error: any) {
-      console.error("KV fetch critical error:", error);
+      console.error("KV FETCH ERROR:", error);
       res.status(500).json({ 
         error: "Failed to fetch data from KV.", 
-        message: error?.message, 
-        code: error?.code,
-        details: typeof error === 'object' ? JSON.stringify(error) : String(error)
+        message: error?.message || "Unknown error",
+        stack: process.env.NODE_ENV === 'development' ? error?.stack : undefined
       });
     }
   });
 
   app.post("/api/data", async (req, res) => {
-    console.log("[API] POST /api/data - Payload size:", JSON.stringify(req.body).length);
+    console.log(`[${new Date().toISOString()}] POST /api/data`);
     try {
       const kv = getKV();
       if (!kv) {
@@ -128,16 +128,15 @@ async function startServer() {
       await Promise.all(operations);
       
       const duration = Date.now() - startTime;
-      console.log(`[KV Save] Completed in ${duration}ms`);
+      console.log(`[KV Save] Success in ${duration}ms`);
       
       res.json({ status: "ok" });
     } catch (error: any) {
-      console.error("KV save critical error:", error);
+      console.error("KV SAVE ERROR:", error);
       res.status(500).json({ error: "Failed to save data to KV.", message: error?.message });
     }
   });
 
-  // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -146,15 +145,24 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  // Only listen if this is the main module (not on Vercel)
+  if (process.env.VITE || process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  }
 }
 
-startServer();
+setupApp().catch(err => {
+  console.error("Failed to setup app:", err);
+});
+
+export default app;

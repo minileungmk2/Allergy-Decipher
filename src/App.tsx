@@ -216,16 +216,27 @@ export default function App() {
       try {
         setFetchError(false);
         setErrorDetails(null);
+        console.log("Fetching data from /api/data...");
         const response = await fetch(`/api/data?t=${Date.now()}`, {
           headers: { 
             'Cache-Control': 'no-cache',
             'Pragma': 'no-cache'
           }
         });
-        const data = await response.json();
+        
+        const contentType = response.headers.get('content-type');
+        let data;
+        
+        if (contentType && contentType.includes('application/json')) {
+          data = await response.json();
+        } else {
+          const text = await response.text();
+          console.error("Non-JSON response received:", text.substring(0, 200));
+          throw new Error(`Server returned non-JSON response (${response.status}): ${text.substring(0, 50)}...`);
+        }
         
         if (response.ok) {
-          console.log("Data fetched from server:", data);
+          console.log("Data fetched from server successfully", data);
           
           let loadedProfiles = INITIAL_PROFILES;
           let loadedHistory = [];
