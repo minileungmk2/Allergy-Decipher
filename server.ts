@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { createServer as createViteServer } from "vite";
 import { Redis } from "@upstash/redis";
 import dotenv from "dotenv";
 
@@ -52,6 +51,10 @@ const PORT = 3000;
 app.use(express.json({ limit: '10mb' }));
 
 // API routes - declared synchronously to avoid race conditions on Vercel
+app.get("/api/hello", (req, res) => {
+  res.json({ message: "API is working", time: new Date().toISOString() });
+});
+
 app.get("/api/debug-kv", async (req, res) => {
   try {
     const kv = getKV();
@@ -150,23 +153,31 @@ app.all("/api/*", (req, res) => {
 
 async function setupApp() {
   if (process.env.NODE_ENV !== "production") {
+    // Dynamic import to avoid top-level dependency on Vercel
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
+    // Basic static serving for other platforms, Vercel uses vercel.json + build output
     const distPath = path.join(process.cwd(), 'dist');
     if (fs.existsSync(distPath)) {
       app.use(express.static(distPath));
       app.get('*', (req, res) => {
-        res.sendFile(path.join(distPath, 'index.html'));
+        const indexPath = path.join(distPath, 'index.html');
+        if (fs.existsSync(indexPath)) {
+          res.sendFile(indexPath);
+        } else {
+          res.status(404).send("SPA entry point not found. Build may have failed.");
+        }
       });
     }
   }
 
-  // Only listen if this is the main module (not on Vercel)
-  if (process.env.VITE || process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
+  // Only listen outside Vercel
+  if (!process.env.VERCEL) {
     app.listen(PORT, "0.0.0.0", () => {
       console.log(`Server running on http://localhost:${PORT}`);
     });
@@ -178,3 +189,4 @@ setupApp().catch(err => {
 });
 
 export default app;
+
