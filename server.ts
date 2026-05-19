@@ -12,24 +12,26 @@ let kvClient: any = null;
 
 function getKV() {
   if (!kvClient) {
-    let url = (process.env.KV_REST_API_URL || "https://modest-bison-130262.upstash.io").trim();
-    let token = (process.env.KV_REST_API_TOKEN || "gQAAAAAAAfzWAAIgcDJkMjk2Zjk3YWQ2ZGE0OTJiYjJlY2I5NjFjNTVlZjM1NA").trim();
-    
-    if (!url || !token || url.includes("<YOUR") || url.includes("PLACEHOLDER")) {
-      console.warn("KV credentials missing or appear to be placeholders. Sync will be disabled.");
-      return null;
+    // Priority: Hardcoded values you provided
+    const fallbackUrl = "https://modest-bison-130262.upstash.io";
+    const fallbackToken = "gQAAAAAAAfzWAAIgcDJkMjk2Zjk3YWQ2ZGE0OTJiYjJlY2I5NjFjNTVlZjM1NA";
+
+    let url = process.env.KV_REST_API_URL;
+    let token = process.env.KV_REST_API_TOKEN;
+
+    // If env vars are missing or placeholders, use your hardcoded ones
+    if (!url || url.includes("<YOUR") || url.includes("PLACEHOLDER")) {
+      url = fallbackUrl;
     }
-    
-    // Ensure URL has protocol
-    if (!url.startsWith('http')) {
-      url = `https://${url}`;
+    if (!token || token.includes("<YOUR") || token.includes("PLACEHOLDER")) {
+      token = fallbackToken;
     }
     
     console.log("Initializing Upstash Redis with URL:", url.substring(0, 30));
     try {
       kvClient = new Redis({
-        url,
-        token,
+        url: url.trim(),
+        token: token.trim(),
       });
     } catch (e) {
       console.error("Failed to create Redis client instance:", e);
