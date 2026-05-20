@@ -24,7 +24,9 @@ import {
   Microscope,
   Pencil,
   Trash2,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Sparkles,
+  BookOpen
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Html5Qrcode } from 'html5-qrcode';
@@ -129,6 +131,9 @@ interface SuspectIngredient {
   ingredient: string;
   count: number;
   percentage: number;
+  reactedCount?: number;
+  safeCount?: number;
+  reasoning?: string;
 }
 
 // --- Constants ---
@@ -225,6 +230,184 @@ const NavButton = ({ active, onClick, icon: Icon, label, customIcon }: { active:
   </button>
 );
 
+// --- Allergen Detection and Normalization Helpers ---
+
+const TYPICAL_ALLERGENS = [
+  'wheat', 'gluten', 'milk', 'dairy', 'egg', 'eggs', 'soy', 'soya', 'peanut', 'peanuts', 
+  'almond', 'walnut', 'pecan', 'cashew', 'hazelnut', 'sesame', 'fish', 'shellfish', 
+  'shrimp', 'crab', 'lobster', 'crustacean', 'mustard', 'celery', 'lupin', 'sulphites',
+  'sulfites', 'sulfur dioxide', 'barley', 'rye', 'oats', 'macadamia', 'pistachio',
+  'lactose', 'whey', 'casein', 'hazelnuts', 'almonds', 'cashews', 'walnuts'
+];
+
+const COMMON_FILLERS = [
+  'water', 'salt', 'sea salt', 'sugar', 'cane sugar', 'citric acid', 'ascorbic acid', 
+  'carbon dioxide', 'filtered water', 'vitamin c', 'calcium carbonate', 'gum', 
+  'natural flavor', 'natural flavoring', 'artificial flavor', 'artificial flavoring',
+  'lecithin', 'sunflower lecithin', 'soy lecithin', 'pectin', 'yeast', 'baking powder',
+  'baking soda', 'sodium bicarbonate'
+];
+
+const normalizeIngredientName = (name: string): string => {
+  let cleaned = name.toLowerCase().trim();
+  
+  // Strip common packaging / status prefixes
+  const prefixes = [
+    /\borganic\b/g, /\bfreeze-dried\b/g, /\bfreeze dried\b/g, /\bdried\b/g,
+    /\bconcentrate\b/g, /\bconcentrated\b/g, /\bpowder\b/g, /\bpowdered\b/g,
+    /\bwhole\b/g, /\bsliced\b/g, /\bslices\b/g, /\braw\b/g, /\bpure\b/g,
+    /\bwild\b/g, /\bground\b/g, /\bcrushed\b/g, /\bcooked\b/g, /\bextract\b/g,
+    /\bjuice\b/g, /\bpaste\b/g, /\bsyrup\b/g, /\bflour\b/g, /\bstarch\b/g,
+    /\bhealthy\b/g, /\bgrown\b/g, /\brefining\b/g, /\brefined\b/g,
+    /\bfresh\b/g, /\bnatural\b/g, /\bpurified\b/g, /\bsweetened\b/g,
+    /\bunsweetened\b/g, /\btoasted\b/g, /\broasted\b/g, /\bpasteurized\b/g,
+    /\bvitamin\s+[a-z0-9]+\b/g, /\bvitamins\b/g, /\bfortified\b/g,
+    /\bwith\s+added\b/g
+  ];
+  
+  prefixes.forEach(pattern => {
+    cleaned = cleaned.replace(pattern, ' ');
+  });
+  
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+  
+  // Plural to singular rules
+  if (cleaned.endsWith('s') && !cleaned.endsWith('ss') && !cleaned.endsWith('us') && !cleaned.endsWith('is') && !cleaned.endsWith('as')) {
+    if (cleaned.endsWith('ies')) {
+      cleaned = cleaned.slice(0, -3) + 'y';
+    } else if (cleaned.endsWith('es') && (cleaned.endsWith('ches') || cleaned.endsWith('shes') || cleaned.endsWith('xes'))) {
+      cleaned = cleaned.slice(0, -2);
+    } else {
+      cleaned = cleaned.slice(0, -1);
+    }
+  }
+  
+  return cleaned.trim();
+};
+
+const isTypicalAllergen = (ingredient: string): boolean => {
+  const norm = ingredient.toLowerCase().trim();
+  return TYPICAL_ALLERGENS.some(allergen => norm.includes(allergen) || allergen.includes(norm));
+};
+
+const DEFAULT_HISTORY_SEED: ProductLog[] = [
+  // Profile '1' (Little One) - milk is the secret culprit
+  {
+    id: 'seed-ko-1',
+    profileId: '1',
+    date: '2026-05-19',
+    reaction: true,
+    name: 'Oatmeal Milk Cookie',
+    brand: 'NurtureKids',
+    barcode: '4101230001',
+    ingredientsText: 'organic rolled oats, whole wheat flour, cow milk, soy lecithin, cane sugar, palm oil',
+    ingredientsList: ['oats', 'wheat', 'milk', 'soy lecithin', 'sugar', 'palm oil'],
+    allergens: ['wheat', 'milk', 'soy'],
+    image: '',
+    notes: 'Developed red blotches on cheeks about 12 minutes after eating'
+  },
+  {
+    id: 'seed-ko-2',
+    profileId: '1',
+    date: '2026-05-18',
+    reaction: false,
+    name: 'Organic Wheat Spaghetti',
+    brand: 'LaPasta',
+    barcode: '8001230002',
+    ingredientsText: 'organic semolina durum wheat, water, olive oil, tomato paste, salt',
+    ingredientsList: ['wheat', 'water', 'olive oil', 'tomato paste', 'salt'],
+    allergens: ['wheat'],
+    image: '',
+    notes: 'Ate a whole bowl happily. Active and happy all night.'
+  },
+  {
+    id: 'seed-ko-3',
+    profileId: '1',
+    date: '2026-05-17',
+    reaction: true,
+    name: 'Buttermilk Pancakes',
+    brand: 'FluffyMornings',
+    barcode: '0123456789',
+    ingredientsText: 'wheat flour, skimmed milk powder, eggs, butter, raising agents, salt, water',
+    ingredientsList: ['wheat', 'milk', 'eggs', 'butter', 'raising agents', 'salt', 'water'],
+    allergens: ['wheat', 'milk', 'eggs'],
+    image: '',
+    notes: 'Complained of tummy-ache and reflux. Refused to run.'
+  },
+  {
+    id: 'seed-ko-4',
+    profileId: '1',
+    date: '2026-05-16',
+    reaction: false,
+    name: 'Fluffy Scrambled Eggs',
+    brand: 'Homegrown Farm',
+    barcode: 'MANUAL',
+    ingredientsText: 'fresh eggs, butter, sea salt, pepper',
+    ingredientsList: ['eggs', 'butter', 'salt', 'pepper'],
+    allergens: ['eggs'],
+    image: '',
+    notes: 'Eaten with spoon. No complaints, went to sleep peacefully.'
+  },
+  {
+    id: 'seed-ko-5',
+    profileId: '1',
+    date: '2026-05-15',
+    reaction: true,
+    name: 'Double Cocoa Hot Chocolate',
+    brand: 'SweetMornings',
+    barcode: '4101230005',
+    ingredientsText: 'raw cocoa powder, sweet whey powder, whole milk powder, vanilla bean, cane sugar, salt',
+    ingredientsList: ['cocoa powder', 'whey powder', 'milk', 'vanilla', 'sugar', 'salt'],
+    allergens: ['milk'],
+    image: '',
+    notes: 'Gassy and restless sleep after evening cup.'
+  },
+
+  // Profile '2' (Grown Up) - peanuts is the secret culprit
+  {
+    id: 'seed-gu-1',
+    profileId: '2',
+    date: '2026-05-19',
+    reaction: true,
+    name: 'Crunchy Peanut Butter Granola',
+    brand: 'NatureValley',
+    barcode: '4101230006',
+    ingredientsText: 'whole wheat flakes, honey, roasted peanuts, almond bits, coconut syrup',
+    ingredientsList: ['wheat', 'honey', 'peanuts', 'almond', 'coconut syrup'],
+    allergens: ['peanuts', 'almonds'],
+    image: '',
+    notes: 'Tongue felt tingly almost immediately. Throat slightly itchy.'
+  },
+  {
+    id: 'seed-gu-2',
+    profileId: '2',
+    date: '2026-05-18',
+    reaction: false,
+    name: 'Almond Honey Cookies',
+    brand: 'NutriBakes',
+    barcode: '4101230007',
+    ingredientsText: 'almond flour, organic honey, butter, milk powder, salt, chocolate chips',
+    ingredientsList: ['almond', 'honey', 'butter', 'milk powder', 'salt', 'chocolate chips'],
+    allergens: ['nuts', 'milk'],
+    image: '',
+    notes: 'Felt vibrant! Excellent evening jog.'
+  },
+  {
+    id: 'seed-gu-3',
+    profileId: '2',
+    date: '2026-05-17',
+    reaction: true,
+    name: 'Salty Satay Pad Thai Box',
+    brand: 'NoodleBox',
+    barcode: '4101230008',
+    ingredientsText: 'rice noodles, peanut oil, garlic, soy sauce, tamarind pulp, crushed peanuts, sugar',
+    ingredientsList: ['rice noodles', 'peanut oil', 'garlic', 'soy sauce', 'peanuts', 'sugar'],
+    allergens: ['peanuts', 'soy'],
+    image: '',
+    notes: 'Developed hives, had to use antihistamines.'
+  }
+];
+
 // --- Main Component ---
 
 export default function App() {
@@ -240,6 +423,7 @@ export default function App() {
   const [showManualAdd, setShowManualAdd] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
   const [analysisResults, setAnalysisResults] = useState<SuspectIngredient[]>([]);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [longPressedId, setLongPressedId] = useState<string | null>(null);
   const longPressTimer = useRef<NodeJS.Timeout | null>(null);
 
@@ -273,6 +457,12 @@ export default function App() {
   const [scanNotes, setScanNotes] = useState('');
   const [editingLogId, setEditingLogId] = useState<string | null>(null);
   const [editLogNotes, setEditLogNotes] = useState('');
+
+  // Sorting, Filtering & Detail Modal State
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterType, setFilterType] = useState<'all' | 'with_notes' | 'scanned' | 'manual'>('all');
+  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'az' | 'za'>('newest');
+  const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
 
   const scannerRef = useRef<HTMLDivElement>(null);
 
@@ -324,10 +514,15 @@ export default function App() {
              console.warn("Profiles in KV is not an array:", data.profiles);
           }
   
-          if (Array.isArray(data.history)) {
+          if (Array.isArray(data.history) && data.history.length > 0) {
             loadedHistory = data.history;
+          } else {
+            console.log("Empty history on backend. Seeding with high-fidelity triangulation demo data...");
+            loadedHistory = DEFAULT_HISTORY_SEED;
+            // Persist the default seed on backend
+            saveData(loadedProfiles, loadedHistory);
           }
-
+  
           setProfiles(loadedProfiles);
           setHistory(loadedHistory);
           setIsDataLoaded(true);
@@ -451,6 +646,7 @@ export default function App() {
   };
 
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   const startScanner = async (retryCount = 0) => {
     if (scanner) return;
@@ -529,6 +725,7 @@ export default function App() {
   const fetchProduct = async (barcode: string) => {
     setLoading(true);
     setScannedProduct(null);
+    setScanError(null);
     try {
       const response = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode}.json`);
       const data = await response.json();
@@ -557,10 +754,10 @@ export default function App() {
           image: product.image_front_small_url || ""
         });
       } else {
-        alert("Product not found. Try manual entry.");
+        setScanError(`Product with code "${barcode}" was not found. Please try entering it manually! Check spelling or use other barcodes.`);
       }
     } catch (err) {
-      alert("Failed to fetch product data.");
+      setScanError("Oops! Failed to connect to product info directory. Please check your internet connection.");
     } finally {
       setLoading(false);
     }
@@ -629,38 +826,120 @@ export default function App() {
   const runAnalysis = () => {
     if (!activeProfile) return;
     
+    setAnalysisError(null);
     const profileHistory = history.filter(h => h.profileId === activeProfile.id);
     const reactedLogs = profileHistory.filter(h => h.reaction);
     const safeLogs = profileHistory.filter(h => !h.reaction);
 
     if (reactedLogs.length === 0) {
-      alert("Please log at least one reaction to run the analysis.");
+      setAnalysisError("no_reactions");
+      setAnalysisResults([]);
       return;
     }
 
-    const safeIngredients = new Set<string>();
-    safeLogs.forEach(log => log.ingredientsList.forEach(ing => safeIngredients.add(ing)));
+    const hasIngredients = reactedLogs.some(log => log.ingredientsList && log.ingredientsList.length > 0);
+    if (!hasIngredients) {
+      setAnalysisError("no_ingredients");
+      setAnalysisResults([]);
+      return;
+    }
 
-    const suspectCounts: Record<string, number> = {};
+    const suspectCounts: Record<string, { reactedCount: number, safeCount: number, originalNames: Set<string> }> = {};
+    
     reactedLogs.forEach((log: ProductLog) => {
-      const uniqueIng = Array.from(new Set(log.ingredientsList));
-      uniqueIng.forEach((ing: string) => {
-        if (!safeIngredients.has(ing)) {
-          suspectCounts[ing] = (suspectCounts[ing] || 0) + 1;
+      const uniqueNormalized = new Set<string>();
+      (log.ingredientsList || []).forEach((ing: string) => {
+        const norm = normalizeIngredientName(ing);
+        if (norm.length > 1) {
+          uniqueNormalized.add(norm);
+          if (!suspectCounts[norm]) {
+            suspectCounts[norm] = { reactedCount: 0, safeCount: 0, originalNames: new Set<string>() };
+          }
+          suspectCounts[norm].originalNames.add(ing);
+        }
+      });
+      uniqueNormalized.forEach(norm => {
+        suspectCounts[norm].reactedCount += 1;
+      });
+    });
+
+    safeLogs.forEach((log: ProductLog) => {
+      const uniqueNormalized = new Set<string>();
+      (log.ingredientsList || []).forEach((ing: string) => {
+        const norm = normalizeIngredientName(ing);
+        if (norm.length > 1) {
+          uniqueNormalized.add(norm);
+        }
+      });
+      uniqueNormalized.forEach(norm => {
+        if (suspectCounts[norm]) {
+          suspectCounts[norm].safeCount += 1;
         }
       });
     });
 
     const results = Object.keys(suspectCounts)
-      .map(ing => ({
-        ingredient: ing,
-        count: suspectCounts[ing],
-        percentage: Math.round((suspectCounts[ing] / reactedLogs.length) * 100)
-      }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 10);
+      .map(normIng => {
+        const { reactedCount, safeCount, originalNames } = suspectCounts[normIng];
+        
+        // Base scoring logic: start with ratio of reacted vs overall
+        // Ouchie appearances VS safe appearances
+        const penaltyValue = safeCount * 2.5; 
+        let rawScore = (reactedCount / (reactedCount + penaltyValue)) * 100;
+        
+        // Confidence modifier for data point volume:
+        // A single log doesn't yet form a reliable trend, so we soften its initial confidence
+        const confidenceWeight = reactedCount === 1 ? 0.5 : reactedCount === 2 ? 0.85 : 1.0;
+        let score = rawScore * confidenceWeight;
+        
+        // Strip common fillers or low allergen additives (water, citric acid, salt etc.)
+        const isCommonFiller = COMMON_FILLERS.includes(normIng) || 
+          COMMON_FILLERS.some(filler => normIng.includes(filler));
+          
+        if (isCommonFiller) {
+          score *= 0.15; // heavily scale down common safe food additives
+        }
+        
+        const finalPercentage = Math.round(score);
+
+        // Generate Human reasoning based on cross-checking
+        let reasoning = '';
+        if (isCommonFiller) {
+          reasoning = `Common food filler/additive. Low generic risk, but tracked for completeness.`;
+        } else if (reactedCount === 1) {
+          reasoning = `Seen in 1 ouchie meal. Needs more cross-checks to establish absolute confidence.`;
+        } else if (safeCount === 0) {
+          reasoning = `Strong trend: Exclusively in ${reactedCount}x ouchies and NEVER eaten safely. Primary suspect!`;
+        } else if (safeCount >= reactedCount) {
+          reasoning = `Unlikely suspect: Consumed safely ${safeCount}x vs ${reactedCount}x ouchies.`;
+        } else {
+          reasoning = `Moderate suspect: Consumed safely ${safeCount}x, but triggered reactions ${reactedCount}x. Potential trigger.`;
+        }
+
+        // Use the most common original name for display, or capitalized normalized
+        const displayList = Array.from(originalNames);
+        const displayLabel = displayList.length > 0 
+          ? displayList.sort((a,b) => a.length - b.length)[0] 
+          : normIng;
+
+        return {
+          ingredient: displayLabel,
+          count: reactedCount,
+          percentage: finalPercentage,
+          reactedCount,
+          safeCount,
+          reasoning
+        };
+      })
+      // Filter out elements with 0% risk to keep insights clean, unless user explicitly has very few entries
+      .filter(item => item.percentage > 0 || history.length < 5)
+      .sort((a, b) => b.percentage - a.percentage || b.count - a.count)
+      .slice(0, 12);
 
     setAnalysisResults(results);
+    if (results.length === 0) {
+      setAnalysisError("no_suspects");
+    }
   };
 
   const getStats = () => {
@@ -679,6 +958,13 @@ export default function App() {
       stopScanner();
     }
   }, [activeTab]);
+
+  // Trigger analysis automatically on tab change, profile change, or history updates to keep insights fully in sync
+  useEffect(() => {
+    if (activeTab === 'analysis' && activeProfile) {
+      runAnalysis();
+    }
+  }, [activeTab, activeProfile, history]);
 
   // --- Views ---
 
@@ -936,6 +1222,25 @@ export default function App() {
         {!loading && !scannedProduct && (
           <div className="p-10 space-y-8 bg-white">
             <p className="text-sm text-center text-slate-400 font-bold uppercase tracking-widest">Show the code to the Eye</p>
+            
+            {scanError && (
+              <div className="p-5 bg-orange-50 border border-orange-100 rounded-3xl flex items-start gap-4 relative animate-in fade-in slide-in-from-top-2">
+                <div className="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-4 h-4 text-orange-655 text-orange-500" />
+                </div>
+                <div className="flex-1 pr-6">
+                  <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide mb-0.5">Scanner Notice</h4>
+                  <p className="text-xs font-medium text-slate-600 leading-normal">{scanError}</p>
+                </div>
+                <button 
+                  onClick={() => setScanError(null)} 
+                  className="absolute top-4 right-4 text-slate-400 hover:text-slate-650 transition-colors p-1 hover:bg-orange-100/50 rounded-lg"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
             <div className="flex gap-4">
               <input 
                 id="manual-input" 
@@ -1006,87 +1311,426 @@ export default function App() {
 
   const HistoryView = () => {
     const profileHistory = history.filter(h => h.profileId === activeProfile?.id);
+
+    // Filter logic
+    const filteredHistory = profileHistory.filter(item => {
+      const matchesSearch = searchQuery.trim() === '' || 
+        item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (item.brand && item.brand.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        (item.notes && item.notes.toLowerCase().includes(searchQuery.toLowerCase()));
+        
+      if (filterType === 'with_notes') return matchesSearch && !!item.notes;
+      if (filterType === 'scanned') return matchesSearch && item.barcode !== 'MANUAL';
+      if (filterType === 'manual') return matchesSearch && item.barcode === 'MANUAL';
+      return matchesSearch;
+    });
+
+    // Sort logic
+    const sortedHistory = [...filteredHistory].sort((a, b) => {
+      if (sortBy === 'newest') {
+        const timeA = isNaN(Number(a.id)) ? new Date(a.date).getTime() : Number(a.id);
+        const timeB = isNaN(Number(b.id)) ? new Date(b.date).getTime() : Number(b.id);
+        return timeB - timeA;
+      }
+      if (sortBy === 'oldest') {
+        const timeA = isNaN(Number(a.id)) ? new Date(a.date).getTime() : Number(a.id);
+        const timeB = isNaN(Number(b.id)) ? new Date(b.date).getTime() : Number(b.id);
+        return timeA - timeB;
+      }
+      if (sortBy === 'az') {
+        return a.name.localeCompare(b.name);
+      }
+      if (sortBy === 'za') {
+        return b.name.localeCompare(a.name);
+      }
+      return 0;
+    });
+
+    // Subdivide columns: Safe (left) and Ouchie (right)
+    const safeLogs = sortedHistory.filter(item => !item.reaction);
+    const ouchieLogs = sortedHistory.filter(item => item.reaction);
+
     return (
-      <div className="space-y-10 py-4">
+      <div className="space-y-8 py-4">
         <h2 className="text-4xl font-bold text-slate-800 px-4">Food Journal</h2>
+
+        {/* Search Bar */}
+        <div className="relative px-4">
+          <div className="absolute inset-y-0 left-4 pl-4 flex items-center pointer-events-none">
+            <Search className="w-5 h-5 text-slate-400" />
+          </div>
+          <input 
+            type="text" 
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search eats, brands, comments..." 
+            className="w-full bg-white border-2 border-slate-100 rounded-[2rem] pl-12 pr-6 py-4 outline-none focus:ring-4 focus:ring-orange-100/50 transition-all font-bold text-slate-705 shadow-sm"
+          />
+        </div>
+
+        {/* Filter Pills and Sort Row */}
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center justify-between px-4 pb-2">
+          {/* Filters */}
+          <div className="flex flex-wrap gap-2">
+            {(['all', 'with_notes', 'scanned', 'manual'] as const).map((type) => {
+              const labels = { 
+                all: 'All', 
+                with_notes: 'Notes 📝', 
+                scanned: 'Scanned 📸', 
+                manual: 'Manual ✍️' 
+              };
+              return (
+                <button
+                  key={type}
+                  onClick={() => setFilterType(type)}
+                  className={`px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-wider transition-all bouncy ${filterType === type ? 'bg-orange-500 text-white shadow-md' : 'bg-white text-slate-400 border border-slate-100'}`}
+                >
+                  {labels[type]}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Sort Dropdown */}
+          <div className="flex items-center gap-2 self-end sm:self-auto">
+            <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">Sort:</span>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as any)}
+              className="bg-white border-2 border-slate-100 rounded-2xl px-3 py-2 text-xs font-bold text-slate-650 outline-none focus:ring-4 focus:ring-orange-100 cursor-pointer text-slate-600"
+            >
+              <option value="newest">Newest Eats</option>
+              <option value="oldest">Oldest Eats</option>
+              <option value="az">A to Z</option>
+              <option value="za">Z to A</option>
+            </select>
+          </div>
+        </div>
+
         {profileHistory.length === 0 ? (
-          <div className="text-center py-40 bg-white rounded-[3rem] border-4 border-dashed border-slate-100"><History className="w-20 h-20 mx-auto mb-8 text-slate-100" /><p className="text-xl font-bold text-slate-200">History is empty!</p></div>
+          <div className="text-center py-40 bg-white rounded-[3rem] border-4 border-dashed border-slate-100 mx-4">
+            <History className="w-20 h-20 mx-auto mb-8 text-slate-100" />
+            <p className="text-xl font-bold text-slate-200">No eats logged yet!</p>
+          </div>
         ) : (
-          <div className="space-y-4">
-            {profileHistory.map(item => (
-              <motion.div layout initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} key={item.id} className={`group bg-white p-6 rounded-[2.5rem] border-2 flex flex-col gap-4 transition-all hover:shadow-xl ${item.reaction ? 'border-orange-100' : 'border-sky-100'}`}>
-                <div className="flex items-center gap-6">
-                  <div className={`w-16 h-16 rounded-[1.5rem] flex items-center justify-center overflow-hidden shrink-0 border-4 border-white shadow-lg ${item.reaction ? 'bg-orange-50' : 'bg-sky-50'}`}>{item.image ? <img src={item.image} className="w-full h-full object-cover" /> : <Barcode className="w-8 h-8 opacity-20" />}</div>
-                  <div className="flex-1 overflow-hidden">
-                    <h4 className="text-xl font-bold text-slate-800 truncate mb-1">{item.name}</h4>
-                    <p className="text-[11px] text-slate-300 font-bold uppercase tracking-widest">{item.date}</p>
-                  </div>
-                  <button onClick={() => { setHistory(history.map(h => h.id === item.id ? { ...h, reaction: !h.reaction } : h)); }} className={`px-6 py-4 rounded-2xl text-[11px] font-black uppercase tracking-widest shadow-sm bouncy ${item.reaction ? 'bg-orange-400 text-white' : 'bg-sky-50 text-sky-500 border-2 border-sky-100'}`}>{item.reaction ? 'Ouchie' : 'Safe'}</button>
-                </div>
-                
-                {item.notes ? (
-                  <div className={`p-4 rounded-2xl text-sm italic ${item.reaction ? 'bg-orange-50 text-orange-700' : 'bg-sky-50 text-sky-700'}`}>
-                    "{item.notes}"
-                    <button 
-                      onClick={() => {
-                        setEditingLogId(item.id);
-                        setEditLogNotes(item.notes || '');
-                      }}
-                      className="ml-2 inline-flex items-center p-2.5 bg-white/50 hover:bg-white rounded-xl transition-all shadow-sm border border-slate-100/50"
-                    >
-                      <Pencil className="w-4 h-4 text-sky-500" />
-                    </button>
+          <div className="grid grid-cols-2 gap-4 md:gap-6 px-4">
+            {/* Left Column: Safe */}
+            <div className="space-y-4">
+              <div className="bg-sky-500/15 text-sky-600 py-3.5 px-4 rounded-[1.5rem] font-black text-center text-[10px] uppercase tracking-widest border border-sky-100 flex items-center justify-center gap-1.5 shadow-sm">
+                <Smile className="w-4 h-4 text-sky-550" /> Safe ({safeLogs.length})
+              </div>
+              <div className="space-y-4">
+                {safeLogs.length === 0 ? (
+                  <div className="text-center py-16 bg-white/40 rounded-[2rem] border-2 border-dashed border-slate-150 p-4">
+                    <p className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Empty column</p>
                   </div>
                 ) : (
-                  <button 
-                    onClick={() => {
-                      setEditingLogId(item.id);
-                      setEditLogNotes('');
-                    }}
-                    className="text-sm font-bold text-slate-400 hover:text-sky-500 transition-colors self-start px-4 py-2 bg-slate-50 rounded-xl flex items-center gap-2 border border-slate-100"
-                  >
-                    <Plus className="w-4 h-4" /> Add note about how you felt
-                  </button>
+                  safeLogs.map(item => (
+                    <motion.div 
+                      layout 
+                      initial={{ opacity: 0, scale: 0.95 }} 
+                      animate={{ opacity: 1, scale: 1 }} 
+                      key={item.id}
+                      onClick={() => setSelectedLogId(item.id)}
+                      className="group bg-white p-4 rounded-[2rem] border-2 border-sky-100 hover:border-sky-300 transition-all hover:shadow-lg cursor-pointer relative"
+                    >
+                      <div className="flex flex-col items-center text-center gap-3">
+                        <div className="w-14 h-14 rounded-2xl flex items-center justify-center overflow-hidden border-2 border-white shadow-md bg-sky-50 shrink-0">
+                          {item.image ? (
+                            <img src={item.image} className="w-full h-full object-cover" />
+                          ) : (
+                            <Barcode className="w-6 h-6 text-sky-400 opacity-40" />
+                          )}
+                        </div>
+                        <div className="w-full min-w-0">
+                          <h4 className="text-xs font-bold text-slate-800 line-clamp-2 leading-snug">{item.name}</h4>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-1">{item.date}</p>
+                        </div>
+                      </div>
+                      {item.notes && (
+                        <div className="absolute top-2 right-2 bg-yellow-400 text-slate-900 p-1.5 rounded-xl shadow-md border border-white flex items-center justify-center">
+                          <Pencil className="w-3 h-3" />
+                        </div>
+                      )}
+                    </motion.div>
+                  ))
                 )}
-              </motion.div>
-            ))}
+              </div>
+            </div>
+
+            {/* Right Column: Ouchie */}
+            <div className="space-y-4">
+              <div className="bg-orange-500/15 text-orange-600 py-3.5 px-4 rounded-[1.5rem] font-black text-center text-[10px] uppercase tracking-widest border border-orange-100 flex items-center justify-center gap-1.5 shadow-sm">
+                <Frown className="w-4 h-4 text-orange-550" /> Ouchie ({ouchieLogs.length})
+              </div>
+              <div className="space-y-4">
+                {ouchieLogs.length === 0 ? (
+                  <div className="text-center py-16 bg-white/40 rounded-[2rem] border-2 border-dashed border-slate-150 p-4">
+                    <p className="text-[10px] font-bold text-slate-300 uppercase tracking-wider">Empty column</p>
+                  </div>
+                ) : (
+                  ouchieLogs.map(item => (
+                    <motion.div 
+                      layout 
+                      initial={{ opacity: 0, scale: 0.95 }} 
+                      animate={{ opacity: 1, scale: 1 }} 
+                      key={item.id}
+                      onClick={() => setSelectedLogId(item.id)}
+                      className="group bg-white p-4 rounded-[2rem] border-2 border-orange-100 hover:border-orange-300 transition-all hover:shadow-lg cursor-pointer relative"
+                    >
+                      <div className="flex flex-col items-center text-center gap-3">
+                        <div className="w-14 h-14 rounded-2xl flex items-center justify-center overflow-hidden border-2 border-white shadow-md bg-orange-50 shrink-0">
+                          {item.image ? (
+                            <img src={item.image} className="w-full h-full object-cover" />
+                          ) : (
+                            <Barcode className="w-6 h-6 text-orange-400 opacity-40" />
+                          )}
+                        </div>
+                        <div className="w-full min-w-0">
+                          <h4 className="text-xs font-bold text-slate-800 line-clamp-2 leading-snug">{item.name}</h4>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-1">{item.date}</p>
+                        </div>
+                      </div>
+                      {item.notes && (
+                        <div className="absolute top-2 right-2 bg-yellow-400 text-slate-900 p-1.5 rounded-xl shadow-md border border-white flex items-center justify-center">
+                          <Pencil className="w-3 h-3" />
+                        </div>
+                      )}
+                    </motion.div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
         )}
       </div>
     );
   };
 
-  const AnalysisView = () => (
-    <div className="space-y-10 py-4">
-      <div className="bg-sky-500 rounded-[4rem] p-16 text-white text-center relative overflow-hidden shadow-2xl shadow-sky-100">
-        <h2 className="text-5xl font-bold mb-6 italic">The Mystery Solver</h2>
-        <p className="text-sky-100 text-lg font-bold uppercase tracking-widest mb-12 max-w-sm mx-auto leading-relaxed">Let's find out what's bothering your tummy!</p>
-        <button onClick={runAnalysis} className="bg-white text-sky-600 font-bold px-16 py-6 rounded-[2.5rem] bouncy text-sm uppercase tracking-widest">Solve the Riddle</button>
-      </div>
-      {analysisResults.length > 0 && (
-        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-5">
-           <h3 className="text-xl font-bold text-slate-800 px-6">Likely Culprits</h3>
-            <div className="bg-white rounded-[3rem] border border-slate-100 shadow-xl overflow-hidden">
-             {analysisResults.map((suspect, idx) => (
-               <div key={idx} className="p-6 md:p-10 border-b last:border-0">
-                 <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end mb-6 gap-2">
-                   <span className="text-xl md:text-2xl font-bold text-slate-800 capitalize">{suspect.ingredient}</span>
-                   <span className="text-[10px] md:text-xs font-black text-slate-300 uppercase tracking-widest">Seen {suspect.count} times ({suspect.percentage}%)</span>
-                 </div>
-                 <div className="w-full bg-slate-100 h-4 rounded-full overflow-hidden border-2 border-white shadow-inner">
-                   <motion.div 
-                     initial={{ width: 0 }} 
-                     animate={{ width: `${suspect.percentage}%` }} 
-                     className={`h-full rounded-full ${suspect.percentage > 70 ? 'bg-orange-500' : 'bg-sky-400'}`} 
-                   />
-                 </div>
-               </div>
-             ))}
-           </div>
+  const AnalysisView = () => {
+    // Check calculations
+    const profileHistory = history.filter(h => h.profileId === activeProfile?.id);
+    const reactedLogsCount = profileHistory.filter(h => h.reaction).length;
+    const safeLogsCount = profileHistory.filter(h => !h.reaction).length;
+
+    return (
+      <div className="space-y-10 py-4">
+        {/* Main Banner Hero */}
+        <div className="bg-sky-500 rounded-[4rem] p-16 text-white text-center relative overflow-hidden shadow-2xl shadow-sky-100 flex flex-col items-center">
+          {/* Decorative background elements */}
+          <div className="absolute top-0 left-0 w-32 h-32 bg-sky-400 rounded-full mix-blend-multiply filter blur-xl opacity-70 -translate-x-12 -translate-y-12"></div>
+          <div className="absolute bottom-0 right-0 w-32 h-32 bg-indigo-400 rounded-full mix-blend-multiply filter blur-xl opacity-75 translate-x-12 translate-y-12"></div>
+          
+          <div className="w-16 h-16 bg-white/10 rounded-[1.5rem] flex items-center justify-center mb-6 backdrop-blur-md">
+            <Microscope className="w-8 h-8 text-white rotate-12" />
+          </div>
+          
+          <h2 className="text-4xl font-extrabold mb-4 tracking-tight leading-none italic">The Mystery Solver</h2>
+          <p className="text-sky-100 text-sm font-semibold uppercase tracking-widest mb-8 max-w-sm mx-auto leading-relaxed">
+            AllerScan Triangulation Engine
+          </p>
+          
+          <button 
+            onClick={runAnalysis} 
+            className="bg-white hover:bg-orange-50 text-sky-600 font-extrabold px-14 py-5 rounded-[2.5rem] bouncy text-xs uppercase tracking-widest shadow-lg shadow-sky-600/30 active:scale-95 transition-all flex items-center gap-2"
+          >
+            <Sparkles className="w-4 h-4 text-orange-500 animate-pulse" /> Solve the Riddle
+          </button>
         </div>
-      )}
-    </div>
-  );
+
+        {/* Inline Alerts & Error States */}
+        {analysisError === "no_reactions" && (
+          <div className="bg-white p-8 rounded-[3rem] border-2 border-slate-100 shadow-sm space-y-6 mx-4 animate-in fade-in slide-in-from-bottom-3">
+            <div className="w-16 h-16 bg-amber-50 text-amber-505 rounded-2xl flex items-center justify-center text-amber-500 shrink-0">
+              <Frown className="w-9 h-9" />
+            </div>
+            <div className="space-y-2">
+              <h4 className="text-xl font-bold text-slate-800">No Ouchie Foods Logged</h4>
+              <p className="text-xs font-semibold text-slate-400 leading-relaxed">
+                The solver works by triangulating ingredients eaten during an allergic reaction (<b>Ouchies</b>) against ingredients consumed safely. Currently, you have logged <b>{reactedLogsCount} Ouchie</b> meals.
+              </p>
+            </div>
+
+            <div className="bg-sky-50/50 p-4 rounded-2xl border border-sky-100 border-dashed text-xs text-slate-500 leading-relaxed space-y-2">
+              <span className="font-bold text-sky-600 inline-block">💡 How Triangulation Science Works:</span>
+              <p>We cross-reference every ingredient in your reaction logs. If an ingredient also appears in your successfully tolerated safe meals, its danger score drops. Ingredients that exclusively appear in your Ouchies trigger a high-risk profile!</p>
+            </div>
+
+            <div className="flex flex-col gap-3 pt-2">
+              <button 
+                onClick={() => setActiveTab('scan')}
+                className="bg-sky-500 hover:bg-sky-600 text-white font-bold py-4 px-6 rounded-2xl text-xs uppercase tracking-wider text-center bouncy shadow-md"
+              >
+                Scan or Add Food
+              </button>
+              
+              <button 
+                onClick={() => {
+                  const loadedHistory = DEFAULT_HISTORY_SEED;
+                  setHistory(loadedHistory);
+                  saveData(profiles, loadedHistory);
+                  setAnalysisError(null);
+                  setTimeout(() => {
+                    // Force state recalculation
+                    runAnalysis();
+                  }, 100);
+                }}
+                className="bg-emerald-50 hover:bg-emerald-100 text-emerald-600 border border-emerald-200 font-bold py-4 px-6 rounded-2xl text-xs uppercase tracking-wider text-center flex items-center justify-center gap-2 bouncy"
+              >
+                <Sparkles className="w-4 h-4 animate-bounce" /> Loading Mock Riddle Food Logs
+              </button>
+            </div>
+          </div>
+        )}
+
+        {analysisError === "no_ingredients" && (
+          <div className="bg-white p-8 rounded-[3rem] border-2 border-slate-100 shadow-sm space-y-6 mx-4 animate-in fade-in slide-in-from-bottom-3">
+            <div className="w-16 h-16 bg-orange-50 text-orange-500 rounded-2xl flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-9 h-9" />
+            </div>
+            <div className="space-y-2">
+              <h4 className="text-xl font-bold text-slate-800">No Ingredients Listed</h4>
+              <p className="text-xs font-semibold text-slate-400 leading-relaxed">
+                You have logged <b>{reactedLogsCount} Ouchie</b> entries, but none of them contain a list of ingredients! The Triangulation solver requires ingredients lists to analyze and isolate overlapping culinary suspects.
+              </p>
+            </div>
+
+            <p className="text-xs text-slate-500 leading-relaxed bg-slate-50 p-4 rounded-xl border border-slate-100">
+              💡 <b>Tip</b>: Head over to your <b>Journal</b>, tap on your entries, and use manual edit to add ingredients separated by commas!
+            </p>
+
+            <div className="flex flex-col gap-3 pt-2">
+              <button 
+                onClick={() => setActiveTab('history')}
+                className="bg-sky-500 hover:bg-sky-600 text-white font-bold py-4 px-6 rounded-2xl text-xs uppercase tracking-wider text-center bouncy shadow-sm"
+              >
+                Go to Journal 📝
+              </button>
+              
+              <button 
+                onClick={() => {
+                  const loadedHistory = DEFAULT_HISTORY_SEED;
+                  setHistory(loadedHistory);
+                  saveData(profiles, loadedHistory);
+                  setAnalysisError(null);
+                  setTimeout(() => {
+                    runAnalysis();
+                  }, 100);
+                }}
+                className="bg-emerald-50 hover:bg-emerald-100 text-emerald-600 border border-emerald-200 font-bold py-4 px-6 rounded-2xl text-xs uppercase tracking-wider text-center flex items-center justify-center gap-2 bouncy"
+              >
+                <Sparkles className="w-4 h-4 animate-bounce" /> Populate High-Fidelity Demo Riddle Logs
+              </button>
+            </div>
+          </div>
+        )}
+
+        {analysisError === "no_suspects" && (
+          <div className="bg-white p-8 rounded-[3rem] border-2 border-slate-100 shadow-sm space-y-6 mx-4 text-center flex flex-col items-center animate-in fade-in slide-in-from-bottom-3">
+            <div className="w-16 h-16 bg-emerald-50 text-emerald-500 rounded-full flex items-center justify-center shrink-0 mb-2">
+              <ShieldCheck className="w-10 h-10" />
+            </div>
+            <div className="space-y-2 max-w-sm">
+              <h4 className="text-xl font-bold text-slate-800">Clear Horizon!</h4>
+              <p className="text-xs font-semibold text-slate-400 leading-relaxed">
+                We analyzed your journal entries but found no active culprits with positive risk scores. This usually means everything you ate on "Ouchie" days was also consumed safely on peaceful days!
+              </p>
+            </div>
+            <p className="text-[10px] text-slate-350 font-bold max-w-xs mt-2 uppercase tracking-wide">
+              Logged: {reactedLogsCount}x 🤢 Ouchies • {safeLogsCount}x 😊 Perfect days
+            </p>
+            <button 
+              onClick={() => {
+                const loadedHistory = DEFAULT_HISTORY_SEED;
+                setHistory(loadedHistory);
+                saveData(profiles, loadedHistory);
+                setAnalysisError(null);
+                setTimeout(() => {
+                  runAnalysis();
+                }, 100);
+              }}
+              className="mt-6 bg-emerald-50 hover:bg-emerald-100 text-emerald-600 border border-emerald-200 font-bold py-4 px-8 rounded-2xl text-xs uppercase tracking-wider text-center flex items-center justify-center gap-2 bouncy"
+            >
+              <Sparkles className="w-4 h-4 animate-bounce" /> Load Complex Overlaps Demo Dataset
+            </button>
+          </div>
+        )}
+
+        {/* Results Block */}
+        {analysisResults.length > 0 && !analysisError && (
+          <div className="space-y-8 animate-in fade-in slide-in-from-bottom-5 px-4">
+            <div className="flex justify-between items-center px-1">
+              <div className="space-y-1">
+                <h3 className="text-2xl font-black text-slate-800 tracking-tight">Likely Culprits</h3>
+                <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">
+                  Triangulation analysis based on {reactedLogsCount} Ouchies
+                </p>
+              </div>
+              <span className="text-[9px] font-black uppercase text-sky-500 tracking-widest bg-sky-50 px-2.5 py-1.5 rounded-lg border border-sky-100">
+                Cross-Checked AI Triangulation
+              </span>
+            </div>
+            <p className="text-xs font-semibold text-slate-400 -mt-4 leading-relaxed px-1">
+              AllerScan compares ingredients found in your <b>Ouchie (reacted)</b> entries against foods you logged as <b>Safe</b>. Ingredients that triggered reactions and have never been eaten safely are ranked higher!
+            </p>
+            
+            <div className="space-y-5">
+              {analysisResults.map((suspect, idx) => {
+                const allergenAlert = isTypicalAllergen(suspect.ingredient);
+                return (
+                  <div key={idx} className="bg-white p-6 rounded-[2.5rem] border-2 border-slate-100 shadow-sm hover:shadow-md transition-all flex flex-col gap-4 relative">
+                    {allergenAlert && (
+                      <span className="absolute top-6 right-6 bg-orange-100 text-orange-600 font-bold uppercase text-[9px] tracking-wider px-2.5 py-1 rounded-xl flex items-center gap-1">
+                        <AlertTriangle className="w-3.5 h-3.5" /> Typical Allergen
+                      </span>
+                    )}
+                    
+                    <div>
+                      <h4 className="text-xl font-bold text-slate-850 capitalize leading-snug pr-28 flex items-center gap-1.5">
+                        {suspect.ingredient}
+                      </h4>
+                      {suspect.reasoning && (
+                        <p className="text-xs font-semibold text-slate-500 mt-1.5 leading-relaxed bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                          {suspect.reasoning}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-[10px] font-black uppercase tracking-wider">
+                        <span className="text-slate-400">Risk Probabilities</span>
+                        <span className={suspect.percentage > 70 ? 'text-orange-500 font-black' : suspect.percentage > 40 ? 'text-amber-500 font-black' : 'text-sky-550 font-black'}>
+                          {suspect.percentage}% Risk Score
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-50 h-3.5 rounded-full overflow-hidden border border-slate-100">
+                        <motion.div 
+                          initial={{ width: 0 }} 
+                          animate={{ width: `${suspect.percentage}%` }} 
+                          className={`h-full rounded-full transition-all ${suspect.percentage > 70 ? 'bg-orange-500' : suspect.percentage > 40 ? 'bg-amber-400' : 'bg-sky-450 bg-sky-400'}`} 
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-4 text-xs font-bold text-slate-500 pt-1.5 border-t border-dashed border-slate-100">
+                      <span className="flex items-center gap-1">
+                        <Frown className="w-4 h-4 text-orange-400" />
+                        Reacted: <b className="text-slate-700">{suspect.reactedCount}x</b>
+                      </span>
+                      <span className="flex items-center gap-1 border-l pl-4 border-slate-100">
+                        <Smile className="w-4 h-4 text-sky-400" />
+                        Safe: <b className="text-slate-700">{suspect.safeCount ? `${suspect.safeCount}x` : '0x'}</b>
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-[#FFF9F5] font-sans selection:bg-orange-100 text-slate-800 overflow-x-hidden">
@@ -1258,6 +1902,197 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {/* Detailed Log Modal */}
+      <AnimatePresence>
+        {selectedLogId && (() => {
+          const selectedLogItem = history.find(h => h.id === selectedLogId);
+          if (!selectedLogItem) return null;
+          return (
+            <div className="fixed inset-0 z-[105] flex items-end sm:items-center justify-center p-0 sm:p-6">
+              <motion.div 
+                initial={{ opacity: 0 }} 
+                animate={{ opacity: 1 }} 
+                exit={{ opacity: 0 }} 
+                onClick={() => setSelectedLogId(null)} 
+                className="absolute inset-0 bg-slate-900/60 backdrop-blur-md" 
+              />
+              <motion.div 
+                initial={{ y: "100%", opacity: 0 }} 
+                animate={{ y: 0, opacity: 1 }} 
+                exit={{ y: "100%", opacity: 0 }} 
+                transition={{ type: "spring", damping: 25 }}
+                className="bg-white rounded-t-[3.5rem] sm:rounded-[3.5rem] w-full max-w-lg p-8 sm:p-10 relative z-10 border-t-8 sm:border-8 border-sky-50 shadow-3xl max-h-[90vh] overflow-y-auto"
+              >
+                <div className="w-16 h-1.5 bg-slate-105 rounded-full mx-auto mb-6 sm:hidden" />
+                
+                {/* Header Section */}
+                <div className="flex gap-6 items-start mb-8">
+                  <div className={`w-20 h-20 rounded-2xl flex items-center justify-center overflow-hidden border-4 border-white shadow-md ${selectedLogItem.reaction ? 'bg-orange-50' : 'bg-sky-50'} shrink-0`}>
+                    {selectedLogItem.image ? (
+                      <img src={selectedLogItem.image} className="w-full h-full object-cover" />
+                    ) : (
+                      <Barcode className="w-10 h-10 text-slate-300" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-[9px] font-black bg-slate-100 text-slate-500 px-3 py-1 rounded-full uppercase tracking-wider mb-2 inline-block">
+                      {selectedLogItem.barcode === 'MANUAL' ? 'Manual Label' : `Barcode: ${selectedLogItem.barcode}`}
+                    </span>
+                    <h3 className="text-2xl font-bold text-slate-800 leading-tight mb-1 truncate">{selectedLogItem.name}</h3>
+                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">{selectedLogItem.brand} • {selectedLogItem.date}</p>
+                  </div>
+                  <button 
+                    onClick={() => setSelectedLogId(null)} 
+                    className="p-2.5 bg-slate-50 border border-slate-150 text-slate-450 hover:bg-slate-100 rounded-2xl transition-all"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                {/* Safe & Ouchie Toggle */}
+                <div className="space-y-3 mb-8">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Consumption Status</label>
+                  <div className="grid grid-cols-2 gap-3 bg-slate-50 p-2 rounded-[2rem] border border-slate-100">
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setHistory(history.map(h => h.id === selectedLogItem.id ? { ...h, reaction: false } : h));
+                      }}
+                      className={`flex items-center justify-center gap-2 py-4 rounded-[1.5rem] text-[11px] font-black uppercase tracking-widest transition-all bouncy ${!selectedLogItem.reaction ? 'bg-sky-550 text-white shadow-md bg-sky-500' : 'text-slate-450 hover:text-slate-600'}`}
+                    >
+                      <Smile className="w-4 h-4" /> Safe Food
+                    </button>
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setHistory(history.map(h => h.id === selectedLogItem.id ? { ...h, reaction: true } : h));
+                      }}
+                      className={`flex items-center justify-center gap-2 py-4 rounded-[1.5rem] text-[11px] font-black uppercase tracking-widest transition-all bouncy ${selectedLogItem.reaction ? 'bg-orange-550 text-white shadow-md bg-orange-500' : 'text-slate-450 hover:text-slate-600'}`}
+                    >
+                      <Frown className="w-4 h-4" /> Ouchie Food
+                    </button>
+                  </div>
+                </div>
+
+                {/* Feel Notes Section */}
+                <div className="space-y-3 mb-8">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 flex items-center gap-2">
+                    <span>How did they feel? Notes</span>
+                    {selectedLogItem.notes && selectedLogItem.notes.trim() !== '' ? (
+                      <span className="text-[9px] text-emerald-500 font-bold font-sans">📝 Auto-saved</span>
+                    ) : null}
+                  </label>
+                  <textarea 
+                    rows={4}
+                    value={selectedLogItem.notes || ''}
+                    onChange={(e) => {
+                      const textValue = e.target.value;
+                      setHistory(history.map(h => h.id === selectedLogItem.id ? { ...h, notes: textValue } : h));
+                    }}
+                    placeholder="E.g. Symptoms, reaction times, or notes on how happily they ate this..." 
+                    className="w-full bg-slate-50 border-2 border-slate-100 rounded-[2rem] px-6 py-4 outline-none focus:ring-4 focus:ring-orange-100/50 transition-all font-bold text-slate-700 text-sm resize-none"
+                  />
+                </div>
+
+                {/* Ingredients & Allergens */}
+                {((selectedLogItem.ingredientsList && selectedLogItem.ingredientsList.length > 0) || (selectedLogItem.allergens && selectedLogItem.allergens.length > 0)) && (
+                  <div className="space-y-4 border-t border-dashed border-slate-100 pt-6 mb-8">
+                    {selectedLogItem.allergens && selectedLogItem.allergens.length > 0 && (
+                      <div className="space-y-2">
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 animate-pulse">Flagged Allergens</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {selectedLogItem.allergens.map((alg, i) => (
+                            <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[10px] font-black uppercase tracking-wider rounded-xl">
+                              {alg}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedLogItem.ingredientsList && selectedLogItem.ingredientsList.length > 0 && (
+                      <div className="space-y-3">
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">
+                          Cross-Checked Ingredients ({selectedLogItem.ingredientsList.length})
+                        </span>
+                        
+                        {/* Table Layout */}
+                        <div className="border border-slate-150 rounded-2xl overflow-hidden bg-white shadow-sm max-h-[220px] overflow-y-auto scrollbar-thin">
+                          <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                              <tr className="bg-slate-50 border-b border-slate-150 text-[9px] font-black uppercase text-slate-400 tracking-wider">
+                                <th className="px-4 py-3">Ingredient</th>
+                                <th className="px-4 py-3 text-right">Family / Status</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {selectedLogItem.ingredientsList.map((ing, k) => {
+                                const allergen = isTypicalAllergen(ing);
+                                return (
+                                  <tr 
+                                    key={k} 
+                                    className={`transition-colors hover:bg-slate-50/50 ${allergen ? 'bg-orange-50/50 hover:bg-orange-50' : ''}`}
+                                  >
+                                    <td className="px-4 py-2.5 font-bold text-slate-700 capitalize leading-relaxed">
+                                      {allergen ? (
+                                        <span className="text-orange-700 font-extrabold flex items-center gap-1.5">
+                                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-orange-500" /> {ing}
+                                        </span>
+                                      ) : (
+                                        <span className="text-slate-600 font-medium">{ing}</span>
+                                      )}
+                                    </td>
+                                    <td className="px-4 py-2.5 text-right font-semibold">
+                                      {allergen ? (
+                                        <span className="inline-block bg-orange-100 text-orange-600 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg">
+                                          ⚠️ Allergen
+                                        </span>
+                                      ) : (
+                                        <span className="inline-block bg-slate-100 text-slate-405 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg text-slate-400">
+                                          Ok
+                                        </span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Footer Buttons: Delete / Close */}
+                <div className="flex gap-4 border-t border-slate-50 pt-6">
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      if (confirm("Are you sure you want to delete this log?")) {
+                        setHistory(history.filter(h => h.id !== selectedLogItem.id));
+                        setSelectedLogId(null);
+                      }
+                    }}
+                    className="flex-1 bg-red-50 text-red-500 font-bold py-5 rounded-3xl text-sm flex items-center justify-center gap-2 hover:bg-red-100 transition-colors bouncy cursor-pointer"
+                  >
+                    <Trash2 className="w-4 h-4" /> Delete Log
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => setSelectedLogId(null)}
+                    className="flex-[2] bg-sky-500 text-white font-bold py-5 rounded-3xl text-sm shadow-xl shadow-sky-100 bouncy uppercase tracking-wider cursor-pointer font-bold"
+                  >
+                    Okay, Done
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
+      </AnimatePresence>
+
       {/* Delete Confirmation Modal */}
       <AnimatePresence>
         {confirmDeleteId && (
