@@ -29,7 +29,7 @@ import {
   BookOpen
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Html5Qrcode } from 'html5-qrcode';
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import appLogo from './assets/images/AllerScan Logo.jpeg';
 
 // --- Transparent Image Helper Component to remove White Background dynamically ---
@@ -303,7 +303,7 @@ const DEFAULT_HISTORY_SEED: ProductLog[] = [
     ingredientsText: 'organic rolled oats, whole wheat flour, cow milk, soy lecithin, cane sugar, palm oil',
     ingredientsList: ['oats', 'wheat', 'milk', 'soy lecithin', 'sugar', 'palm oil'],
     allergens: ['wheat', 'milk', 'soy'],
-    image: '',
+    image: 'https://images.unsplash.com/photo-1499636136210-6f4ee915583e?auto=format&fit=crop&w=300&q=80',
     notes: 'Developed red blotches on cheeks about 12 minutes after eating'
   },
   {
@@ -317,7 +317,7 @@ const DEFAULT_HISTORY_SEED: ProductLog[] = [
     ingredientsText: 'organic semolina durum wheat, water, olive oil, tomato paste, salt',
     ingredientsList: ['wheat', 'water', 'olive oil', 'tomato paste', 'salt'],
     allergens: ['wheat'],
-    image: '',
+    image: 'https://images.unsplash.com/photo-1516100882582-76c9a386591c?auto=format&fit=crop&w=300&q=80',
     notes: 'Ate a whole bowl happily. Active and happy all night.'
   },
   {
@@ -331,7 +331,7 @@ const DEFAULT_HISTORY_SEED: ProductLog[] = [
     ingredientsText: 'wheat flour, skimmed milk powder, eggs, butter, raising agents, salt, water',
     ingredientsList: ['wheat', 'milk', 'eggs', 'butter', 'raising agents', 'salt', 'water'],
     allergens: ['wheat', 'milk', 'eggs'],
-    image: '',
+    image: 'https://images.unsplash.com/photo-1567620905732-2d1ec7ab7445?auto=format&fit=crop&w=300&q=80',
     notes: 'Complained of tummy-ache and reflux. Refused to run.'
   },
   {
@@ -345,7 +345,7 @@ const DEFAULT_HISTORY_SEED: ProductLog[] = [
     ingredientsText: 'fresh eggs, butter, sea salt, pepper',
     ingredientsList: ['eggs', 'butter', 'salt', 'pepper'],
     allergens: ['eggs'],
-    image: '',
+    image: 'https://images.unsplash.com/photo-1525351484163-7529414344d8?auto=format&fit=crop&w=300&q=80',
     notes: 'Eaten with spoon. No complaints, went to sleep peacefully.'
   },
   {
@@ -359,7 +359,7 @@ const DEFAULT_HISTORY_SEED: ProductLog[] = [
     ingredientsText: 'raw cocoa powder, sweet whey powder, whole milk powder, vanilla bean, cane sugar, salt',
     ingredientsList: ['cocoa powder', 'whey powder', 'milk', 'vanilla', 'sugar', 'salt'],
     allergens: ['milk'],
-    image: '',
+    image: 'https://images.unsplash.com/photo-1544787219-7f47ccb76574?auto=format&fit=crop&w=300&q=80',
     notes: 'Gassy and restless sleep after evening cup.'
   },
 
@@ -375,7 +375,7 @@ const DEFAULT_HISTORY_SEED: ProductLog[] = [
     ingredientsText: 'whole wheat flakes, honey, roasted peanuts, almond bits, coconut syrup',
     ingredientsList: ['wheat', 'honey', 'peanuts', 'almond', 'coconut syrup'],
     allergens: ['peanuts', 'almonds'],
-    image: '',
+    image: 'https://images.unsplash.com/photo-1517881917430-e70dfb3610aa?auto=format&fit=crop&w=300&q=80',
     notes: 'Tongue felt tingly almost immediately. Throat slightly itchy.'
   },
   {
@@ -389,7 +389,7 @@ const DEFAULT_HISTORY_SEED: ProductLog[] = [
     ingredientsText: 'almond flour, organic honey, butter, milk powder, salt, chocolate chips',
     ingredientsList: ['almond', 'honey', 'butter', 'milk powder', 'salt', 'chocolate chips'],
     allergens: ['nuts', 'milk'],
-    image: '',
+    image: 'https://images.unsplash.com/photo-1558961309-db0114464f7e?auto=format&fit=crop&w=300&q=80',
     notes: 'Felt vibrant! Excellent evening jog.'
   },
   {
@@ -403,7 +403,7 @@ const DEFAULT_HISTORY_SEED: ProductLog[] = [
     ingredientsText: 'rice noodles, peanut oil, garlic, soy sauce, tamarind pulp, crushed peanuts, sugar',
     ingredientsList: ['rice noodles', 'peanut oil', 'garlic', 'soy sauce', 'peanuts', 'sugar'],
     allergens: ['peanuts', 'soy'],
-    image: '',
+    image: 'https://images.unsplash.com/photo-1559314809-0d155014e29e?auto=format&fit=crop&w=300&q=80',
     notes: 'Developed hives, had to use antihistamines.'
   }
 ];
@@ -669,15 +669,38 @@ export default function App() {
     try {
       // Use the ref element ID or the element itself if supported (ID is safer for this lib)
       const elementId = scannerRef.current.id || "reader";
-      const newScanner = new Html5Qrcode(elementId);
+      
+      const formatsToSupport = [
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.UPC_A,
+        Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.EAN_13,
+        Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.CODE_39,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.ITF
+      ];
+
+      const newScanner = new Html5Qrcode(elementId, {
+        formatsToSupport,
+        verbose: false
+      });
       setScanner(newScanner);
 
       const cameras = await Html5Qrcode.getCameras().catch(() => []);
       console.log("Cameras detected:", cameras);
 
       const config = { 
-        fps: 15, 
-        qrbox: { width: 250, height: 150 },
+        fps: 20, 
+        qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
+          // A wide and thin box is most optimal for scanning 1D barcodes on mobile devices
+          const scanWidth = Math.floor(viewfinderWidth * 0.85);
+          const scanHeight = Math.floor(viewfinderHeight * 0.45);
+          return {
+            width: scanWidth > 320 ? 320 : scanWidth,
+            height: scanHeight > 180 ? 180 : scanHeight
+          };
+        },
         // iOS Safari specifics:
         videoConstraints: {
           facingMode: "environment",
@@ -751,7 +774,7 @@ export default function App() {
           ingredientsText: product.ingredients_text || "Ingredients not listed.",
           ingredientsList: ingredientsArray,
           allergens: product.allergens_tags ? product.allergens_tags.map((a: string) => a.replace('en:', '').replace(/-/g, ' ')) : [],
-          image: product.image_front_small_url || ""
+          image: product.image_front_small_url || product.image_front_url || product.image_small_url || product.image_url || product.image_thumb_url || ""
         });
       } else {
         setScanError(`Product with code "${barcode}" was not found. Please try entering it manually! Check spelling or use other barcodes.`);
@@ -1241,21 +1264,36 @@ export default function App() {
               </div>
             )}
 
-            <div className="flex gap-4">
+            <form 
+              onSubmit={(e) => { 
+                e.preventDefault(); 
+                const el = document.getElementById('manual-input') as HTMLInputElement; 
+                if (el && el.value) fetchProduct(el.value); 
+              }} 
+              className="relative flex items-center"
+            >
               <input 
                 id="manual-input" 
                 type="text" 
+                inputMode="numeric"
+                pattern="[0-9]*"
                 placeholder="Or type the code here" 
-                className="flex-1 bg-slate-50 border-2 border-slate-100 rounded-3xl px-8 py-5 text-lg font-bold text-slate-700 outline-none transition-all placeholder:text-slate-200" 
-                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') fetchProduct((e.target as HTMLInputElement).value); }} 
+                className="w-full bg-slate-50 border-2 border-slate-100 rounded-[2rem] pl-6 pr-16 py-4 text-base font-bold text-slate-700 outline-none transition-all placeholder:text-slate-300 focus:border-sky-400 focus:bg-white focus:ring-4 focus:ring-sky-100/50 shadow-inner"
+                onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => { 
+                  if (e.key === 'Enter') {
+                    const val = (e.target as HTMLInputElement).value;
+                    if (val) fetchProduct(val);
+                  }
+                }} 
               />
               <button 
-                onClick={() => { const el = document.getElementById('manual-input') as HTMLInputElement; if (el && el.value) fetchProduct(el.value); }} 
-                className="bg-sky-500 text-white p-5 rounded-3xl shadow-xl bouncy"
+                type="submit"
+                className="absolute right-2 top-1/2 -translate-y-1/2 bg-sky-500 hover:bg-sky-600 text-white p-3.5 rounded-full shadow-lg active:scale-95 transition-all flex items-center justify-center bouncy"
+                aria-label="Search barcode"
               >
-                <Search className="w-7 h-7" />
+                <Search className="w-5 h-5" />
               </button>
-            </div>
+            </form>
             <button 
               onClick={() => { setShowManualAdd(true); stopScanner(); }} 
               className="w-full py-6 text-sm font-bold text-sky-500 hover:text-sky-600 bg-sky-50/50 rounded-[2rem] border-4 border-dashed border-sky-100 transition-all uppercase"
@@ -1271,7 +1309,7 @@ export default function App() {
           <motion.div initial={{ y: 50, opacity: 0, scale: 0.95 }} animate={{ y: 0, opacity: 1, scale: 1 }} exit={{ y: 50, opacity: 0, scale: 0.95 }} className="bg-white rounded-[3.5rem] shadow-2xl p-10 space-y-8 relative border-8 border-sky-50 overflow-hidden">
             <div className="flex gap-8 items-start">
               {scannedProduct.image ? (
-                <img src={scannedProduct.image} alt="Product" className="w-28 h-28 object-cover rounded-3xl shadow-lg border-4 border-white shrink-0" />
+                <img src={scannedProduct.image} alt="Product" className="w-28 h-28 object-cover rounded-3xl shadow-lg border-4 border-white shrink-0" referrerPolicy="no-referrer" />
               ) : (
                 <div className="w-28 h-28 bg-slate-50 rounded-3xl flex items-center justify-center text-slate-200 border-4 border-white shrink-0 shadow-inner"><Barcode className="w-14 h-14" /></div>
               )}
@@ -1437,7 +1475,7 @@ export default function App() {
                       <div className="flex flex-col items-center text-center gap-3">
                         <div className="w-14 h-14 rounded-2xl flex items-center justify-center overflow-hidden border-2 border-white shadow-md bg-sky-50 shrink-0">
                           {item.image ? (
-                            <img src={item.image} className="w-full h-full object-cover" />
+                            <img src={item.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                           ) : (
                             <Barcode className="w-6 h-6 text-sky-400 opacity-40" />
                           )}
@@ -1481,7 +1519,7 @@ export default function App() {
                       <div className="flex flex-col items-center text-center gap-3">
                         <div className="w-14 h-14 rounded-2xl flex items-center justify-center overflow-hidden border-2 border-white shadow-md bg-orange-50 shrink-0">
                           {item.image ? (
-                            <img src={item.image} className="w-full h-full object-cover" />
+                            <img src={item.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                           ) : (
                             <Barcode className="w-6 h-6 text-orange-400 opacity-40" />
                           )}
@@ -1930,7 +1968,7 @@ export default function App() {
                 <div className="flex gap-6 items-start mb-8">
                   <div className={`w-20 h-20 rounded-2xl flex items-center justify-center overflow-hidden border-4 border-white shadow-md ${selectedLogItem.reaction ? 'bg-orange-50' : 'bg-sky-50'} shrink-0`}>
                     {selectedLogItem.image ? (
-                      <img src={selectedLogItem.image} className="w-full h-full object-cover" />
+                      <img src={selectedLogItem.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                     ) : (
                       <Barcode className="w-10 h-10 text-slate-300" />
                     )}
