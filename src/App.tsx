@@ -683,6 +683,8 @@ export default function App() {
 
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [isVisionAnalyzingIngredients, setIsVisionAnalyzingIngredients] = useState(false);
+  const [visionIngredientsError, setVisionIngredientsError] = useState<string | null>(null);
 
   const stopVideoStream = () => {
     if (videoStreamRef.current) {
@@ -1060,6 +1062,214 @@ export default function App() {
       setScanError("Failed to freeze camera frame. Please try again.");
       setIsCapturing(false);
     }
+  };
+
+  const analyzeWithAIVision = async (base64Image: string) => {
+    setLoading(true);
+    setScannedProduct(null);
+    setScanError(null);
+    try {
+      console.log("Analyzing label/photo with Gemini Vision...");
+      const res = await fetch("/api/gemini/analyze-photo", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ image: base64Image })
+      });
+
+      if (!res.ok) {
+        throw new Error(`AI parse request failed with status ${res.status}`);
+      }
+
+      const data = await res.json();
+      console.log("AI Vision Parsing Output:", data);
+
+      if (data.success && data.productDetails) {
+        stopVideoStream();
+        
+        const hasBarcode = data.detectedBarcode && data.detectedBarcode.trim() !== "";
+        
+        // Structure the parsed ingredients and allergen components
+        setScannedProduct({
+          barcode: hasBarcode ? data.detectedBarcode : "MANUAL",
+          name: data.productDetails.name || "AI Discovered Item",
+          brand: data.productDetails.brand || "AI Label Scanner",
+          ingredientsText: data.productDetails.ingredientsText || "Ingredients not listed.",
+          ingredientsList: data.productDetails.ingredientsList || [],
+          allergens: data.productDetails.allergens || [],
+          image: "" // Scanned by AI
+        });
+
+        // Automatically prefill input with whatever identity we got
+        const labelToFill = data.detectedBarcode || data.detectedTextSearch || data.productDetails.name;
+        const searchBox = document.getElementById('manual-input') as HTMLInputElement;
+        if (searchBox && labelToFill) {
+          searchBox.value = labelToFill;
+        }
+      } else if (data.detectedBarcode && data.detectedBarcode.trim() !== "") {
+        console.log("Only barcode identifier code found:", data.detectedBarcode);
+        await fetchProduct(data.detectedBarcode);
+      } else {
+        setScanError("AI was unable to clearly locate any ingredient label details or barcodes. Try snapping a closer, more flat & highly illuminated label photo.");
+      }
+    } catch (err: any) {
+      console.error("AI Analysis Error:", err);
+      setScanError("Advanced AI OCR parser service error: " + (err.message || err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const captureAndScanAI = async () => {
+    if (!videoRef.current || isCapturing) return;
+    setIsCapturing(true);
+    setScanError(null);
+
+    // Visual camera snapshot flash animation
+    setShutterActive(true);
+    setTimeout(() => setShutterActive(false), 200);
+
+    try {
+      const video = videoRef.current;
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        throw new Error("Could not acquire canvas drawing context.");
+      }
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const base64 = canvas.toDataURL('image/png');
+      setIsCapturing(false);
+      await analyzeWithAIVision(base64);
+    } catch (err: any) {
+      console.error("AI Frame capture error:", err);
+      setScanError("Could not snap camera frame: " + (err.message || err));
+      setIsCapturing(false);
+    }
+  };
+
+  const handleAIScanUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setLoading(true);
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        try {
+          const base64 = reader.result as string;
+          await analyzeWithAIVision(base64);
+        } catch (err) {
+          setScanError("Could not process uploaded/photographed file.");
+          setLoading(false);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleScanIngredientsForLog = async (e: React.ChangeEvent<HTMLInputElement>, logId: string) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsVisionAnalyzingIngredients(true);
+    setVisionIngredientsError(null);
+    
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      try {
+        const base64 = reader.result as string;
+        const res = await fetch("/api/gemini/analyze-photo", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ image: base64 })
+        });
+
+        if (!res.ok) {
+          throw new Error("AI parser failed with status: " + res.status);
+        }
+
+        const data = await res.json();
+        if (data.success && data.productDetails) {
+          const updatedHistory = history.map(h => {
+            if (h.id === logId) {
+              return {
+                ...h,
+                ingredientsText: data.productDetails.ingredientsText || h.ingredientsText,
+                ingredientsList: data.productDetails.ingredientsList || h.ingredientsList,
+                allergens: data.productDetails.allergens || h.allergens,
+                name: h.name === "Unknown Product" || !h.name ? (data.productDetails.name || h.name) : h.name,
+                brand: h.brand === "Unknown Brand" || !h.brand ? (data.productDetails.brand || h.brand) : h.brand,
+              };
+            }
+            return h;
+          });
+          setHistory(updatedHistory);
+          await saveData(profiles, updatedHistory);
+        } else {
+          setVisionIngredientsError("AI wasn't able to extract ingredients label details. Ensure you take a direct, high-quality, flat photo of the ingredients list.");
+        }
+      } catch (err: any) {
+        console.error("AI ingredient auto-register error:", err);
+        setVisionIngredientsError("Failed to auto-register ingredients: " + (err.message || err));
+      } finally {
+        setIsVisionAnalyzingIngredients(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleScanIngredientsForScannedProduct = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsVisionAnalyzingIngredients(true);
+    setVisionIngredientsError(null);
+    
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      try {
+        const base64 = reader.result as string;
+        const res = await fetch("/api/gemini/analyze-photo", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ image: base64 })
+        });
+
+        if (!res.ok) {
+          throw new Error("AI parser failed with status: " + res.status);
+        }
+
+        const data = await res.json();
+        if (data.success && data.productDetails) {
+          setScannedProduct(prev => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              ingredientsText: data.productDetails.ingredientsText || prev.ingredientsText,
+              ingredientsList: data.productDetails.ingredientsList || prev.ingredientsList,
+              allergens: data.productDetails.allergens || prev.allergens,
+              name: prev.name === "Unknown Product" || !prev.name ? (data.productDetails.name || prev.name) : prev.name,
+              brand: prev.brand === "Unknown Brand" || !prev.brand ? (data.productDetails.brand || prev.brand) : prev.brand,
+            };
+          });
+        } else {
+          setVisionIngredientsError("AI wasn't able to extract ingredients label details. Ensure you take a direct, high-quality, flat photo of the ingredients list.");
+        }
+      } catch (err: any) {
+        console.error("AI ingredient auto-register error:", err);
+        setVisionIngredientsError("Failed to auto-register ingredients: " + (err.message || err));
+      } finally {
+        setIsVisionAnalyzingIngredients(false);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const fetchProduct = async (barcode: string) => {
@@ -1511,45 +1721,17 @@ export default function App() {
   };
 
   const ScannerView = () => (
-    <div className="space-y-8">
-      {/* Premium Segmented Scanner Mode Toggle */}
-      <div className="bg-slate-150 p-1.5 rounded-[2.2rem] flex max-w-md mx-auto shadow-inner border border-slate-200/40 relative">
-        <button
-          onClick={() => setScannerMode('capture')}
-          type="button"
-          className={`flex-1 flex items-center justify-center gap-2 py-3 px-6 rounded-[1.7rem] text-xs font-black uppercase tracking-wider transition-all duration-300 ${
-            scannerMode === 'capture'
-              ? 'bg-white text-sky-600 shadow-lg shadow-slate-200/80 scale-[1.02]'
-              : 'text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <Camera className="w-4 h-4" />
-          Tap to Capture (Reliable)
-        </button>
-        <button
-          onClick={() => setScannerMode('auto')}
-          type="button"
-          className={`flex-1 flex items-center justify-center gap-2 py-3 px-6 rounded-[1.7rem] text-xs font-black uppercase tracking-wider transition-all duration-300 ${
-            scannerMode === 'auto'
-              ? 'bg-white text-sky-600 shadow-lg shadow-slate-200/80 scale-[1.02]'
-              : 'text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <div className="w-2 h-2 bg-orange-400 rounded-full animate-pulse" />
-          Auto-Scan (Beta)
-        </button>
-      </div>
-
+    <div className="space-y-8 animate-in fade-in duration-300">
       <div className="bg-white rounded-[3.5rem] shadow-2xl overflow-hidden border-8 border-white relative">
         <div className="p-6 bg-yellow-50 border-b border-yellow-100 flex justify-between items-center">
           <div className="flex items-center gap-3">
-            <div className={`w-4 h-4 rounded-full animate-pulse shadow-lg ${scannerMode === 'capture' ? 'bg-sky-400 shadow-sky-200' : 'bg-orange-400 shadow-orange-200'}`}></div>
+            <Sparkles className="w-5 h-5 text-violet-500 animate-pulse" />
             <h3 className="text-sm font-bold text-slate-700 uppercase tracking-widest">
-              {scannerMode === 'capture' ? 'Snapshot Assistant' : 'Magic Eye Active'}
+              AI Vision Packaging Reader
             </h3>
           </div>
-          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">
-            {scannerMode === 'capture' ? 'Tap To Snap' : 'Point & Find'}
+          <p className="text-[10px] font-black text-violet-600 uppercase tracking-widest bg-violet-100/50 px-3 py-1.5 rounded-xl border border-violet-200">
+            Auto-Translates to English
           </p>
         </div>
         
@@ -1561,39 +1743,32 @@ export default function App() {
 
           {/* Guidelines Reticle */}
           <div className="absolute inset-0 pointer-events-none z-10">
-             <div className={`absolute top-10 left-10 w-20 h-20 border-t-8 border-l-8 rounded-tl-[3rem] transition-colors duration-500 ${scannerMode === 'capture' ? 'border-sky-400' : 'border-orange-400'}`}></div>
-             <div className={`absolute top-10 right-10 w-20 h-20 border-t-8 border-r-8 rounded-tr-[3rem] transition-colors duration-500 ${scannerMode === 'capture' ? 'border-sky-400' : 'border-orange-400'}`}></div>
-             <div className={`absolute bottom-10 left-10 w-20 h-20 border-b-8 border-l-8 rounded-bl-[3rem] transition-colors duration-500 ${scannerMode === 'capture' ? 'border-sky-400' : 'border-orange-400'}`}></div>
-             <div className={`absolute bottom-10 right-10 w-20 h-20 border-b-8 border-r-8 rounded-br-[3rem] transition-colors duration-500 ${scannerMode === 'capture' ? 'border-sky-400' : 'border-orange-400'}`}></div>
-             <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 border-4 rounded-full animate-ping ${scannerMode === 'capture' ? 'border-sky-400/30' : 'border-orange-400/30'}`}></div>
+             <div className="absolute top-10 left-10 w-20 h-20 border-t-8 border-l-8 rounded-tl-[3rem] border-violet-500/85"></div>
+             <div className="absolute top-10 right-10 w-20 h-20 border-t-8 border-r-8 rounded-tr-[3rem] border-violet-500/85"></div>
+             <div className="absolute bottom-10 left-10 w-20 h-20 border-b-8 border-l-8 rounded-bl-[3rem] border-violet-500/85"></div>
+             <div className="absolute bottom-10 right-10 w-20 h-20 border-b-8 border-r-8 rounded-br-[3rem] border-violet-500/85"></div>
+             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 border-4 rounded-full animate-ping border-violet-500/20"></div>
           </div>
           
-          {scannerMode === 'capture' ? (
-            <video 
-              ref={bindVideoRef}
-              playsInline
-              autoPlay
-              muted
-              className="absolute inset-0 w-full h-full object-cover z-0"
-              style={{ display: 'block' }}
-            />
-          ) : (
-            <div id="reader" ref={scannerRef} className="absolute inset-0 w-full h-full z-0"></div>
-          )}
+          <video 
+            ref={bindVideoRef}
+            playsInline
+            autoPlay
+            muted
+            className="absolute inset-0 w-full h-full object-cover z-0"
+            style={{ display: 'block' }}
+          />
           
           {cameraError && (
              <div className="absolute inset-0 bg-white/95 flex flex-col items-center justify-center p-8 z-30 backdrop-blur-lg">
                <div className="w-20 h-20 bg-orange-50 text-orange-500 rounded-[2rem] flex items-center justify-center mb-6">
                  <AlertTriangle className="w-10 h-10" />
                </div>
-               <h3 className="text-xl font-bold text-slate-800 mb-2">Camera Access Ouchie</h3>
+               <h3 className="text-xl font-bold text-slate-800 mb-2">Camera Access Notice</h3>
                <p className="text-sm text-slate-400 font-bold mb-8 text-center">{cameraError}</p>
                <button 
-                 onClick={() => {
-                   if (scannerMode === 'capture') startVideoStream();
-                   else startScanner();
-                 }}
-                 className="bg-sky-500 text-white font-bold px-10 py-4 rounded-3xl shadow-xl bouncy animate-bounce"
+                 onClick={() => startVideoStream()}
+                 className="bg-indigo-600 text-white font-bold px-10 py-4 rounded-3xl shadow-xl bouncy animate-bounce"
                >
                  Try Again
                </button>
@@ -1602,27 +1777,25 @@ export default function App() {
 
           {loading && (
             <div className="absolute inset-0 bg-white/90 flex flex-col items-center justify-center gap-6 z-20 backdrop-blur-md">
-              <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: 'linear' }} className="w-16 h-16 text-sky-500 rounded-full flex items-center justify-center"><Loader2 className="w-16 h-16" /></motion.div>
-              <p className="text-xl font-bold text-slate-800">Finding yummy details...</p>
+              <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: 'linear' }} className="w-16 h-16 text-indigo-600 rounded-full flex items-center justify-center"><Loader2 className="w-16 h-16 animate-spin" /></motion.div>
+              <p className="text-xl font-bold text-slate-800">Reading packing label...</p>
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest animate-pulse max-w-xs text-center">Gemini is translating foreign labels in real-time...</p>
             </div>
           )}
 
           {!scanning && !loading && !scannedProduct && !cameraError && (
             <div className="absolute inset-0 bg-white/50 backdrop-blur-sm flex flex-col items-center justify-center gap-6 z-20">
-              <div className="w-20 h-20 bg-sky-50 text-sky-500 rounded-[2rem] flex items-center justify-center shadow-inner">
+              <div className="w-20 h-20 bg-indigo-50 text-indigo-600 rounded-[2rem] flex items-center justify-center shadow-inner">
                 <Camera className="w-10 h-10" />
               </div>
               <button 
-                onClick={() => {
-                  if (scannerMode === 'capture') startVideoStream();
-                  else startScanner();
-                }}
-                className="bg-sky-500 text-white font-bold px-10 py-5 rounded-[2rem] shadow-2xl bouncy flex items-center gap-3 animate-pulse"
+                onClick={() => startVideoStream()}
+                className="bg-indigo-600 text-white font-bold px-10 py-5 rounded-[2rem] shadow-2xl bouncy flex items-center gap-3 animate-pulse"
               >
                 <div className="w-2 h-2 bg-white rounded-full animate-ping" />
-                Open Camera Feed
+                Open Live Scanner
               </button>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center px-10">Hold the frame steady when capturing</p>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center px-10">Hold packaging flat under the target guides</p>
             </div>
           )}
 
@@ -1637,54 +1810,76 @@ export default function App() {
         {!loading && !scannedProduct && (
           <div className="p-10 space-y-8 bg-white">
             
-            {/* Capture button overlay for manual mode */}
-            {scannerMode === 'capture' && scanning && (
-              <div className="flex flex-col items-center justify-center pb-8 border-b border-slate-100 gap-3">
-                <button
-                  onClick={captureAndScan}
-                  disabled={isCapturing}
-                  type="button"
-                  className="w-full bg-gradient-to-r from-sky-500 to-indigo-505 bg-sky-500 hover:bg-sky-600 text-white font-black px-10 py-5 rounded-[2rem] shadow-xl hover:shadow-2xl disabled:bg-slate-300 active:scale-[0.98] transition-all flex items-center justify-center gap-3 bouncy"
-                >
-                  {isCapturing ? (
-                    <>
-                      <Loader2 className="w-6 h-6 animate-spin" />
-                      Freezing & Scanning Barcode...
-                    </>
-                  ) : (
-                    <>
-                      <Camera className="w-6 h-6" />
-                      CAPTURE & SCAN BARCODE
-                    </>
-                  )}
-                </button>
-                <p className="text-xs font-black text-sky-500 uppercase tracking-widest text-center">
-                  Align barcode horizontally & stay steady before tapping!
-                </p>
+            {scanning && (
+              <div className="flex flex-col pb-8 border-b border-slate-100 gap-6">
+                <div className="w-full">
+                  {/* AI Vision Scan */}
+                  <button
+                    onClick={captureAndScanAI}
+                    disabled={isCapturing}
+                    type="button"
+                    className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white font-black px-6 py-5 rounded-[2rem] shadow-xl hover:shadow-2xl disabled:bg-slate-350 active:scale-[0.98] transition-all flex items-center justify-center gap-2 bouncy text-base"
+                  >
+                    {isCapturing ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        AI Analysis in Progress...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-5 h-5 animate-pulse" />
+                        Snap and Scan Label with AI
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Direct High-res photo upload using native system camera */}
+                <div className="bg-gradient-to-br from-violet-50 to-indigo-50/50 p-6 rounded-3xl border border-indigo-100/50 flex flex-col sm:flex-row items-center justify-between gap-4 text-center sm:text-left">
+                  <div className="flex-1">
+                    <h4 className="text-sm font-bold text-slate-800 flex items-center gap-2 justify-center sm:justify-start">
+                      <Sparkles className="w-4 h-4 text-violet-500" />
+                      Take Photo with Phone Camera
+                    </h4>
+                    <p className="text-xs text-slate-500 font-medium mt-1 leading-normal">
+                      Struggling with webcam focus? Use your device's native high-res camera to snap and parse any label.
+                    </p>
+                  </div>
+                  <label className="bg-white hover:bg-violet-50 border border-indigo-200 text-indigo-600 py-3 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-sm shrink-0 whitespace-nowrap inline-block">
+                    Camera Roll / Snap
+                    <input 
+                      type="file" 
+                      accept="image/*" 
+                      capture="environment" 
+                      onChange={handleAIScanUpload}
+                      className="hidden" 
+                    />
+                  </label>
+                </div>
               </div>
             )}
 
             <p className="text-xs text-center text-slate-400 font-bold uppercase tracking-widest">
-              {scannerMode === 'capture' 
-                ? "Align the barcode inside the target box and click Capture" 
-                : "Show the code to the Eye"}
+              Scan any packaging or list of ingredients.
             </p>
             
             {scanError && (
-              <div className="p-5 bg-orange-50 border border-orange-100 rounded-3xl flex items-start gap-4 relative animate-in fade-in slide-in-from-top-2">
-                <div className="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center shrink-0">
-                  <AlertTriangle className="w-4 h-4 text-orange-500" />
+              <div className="p-5 bg-orange-50 border border-orange-100 rounded-3xl flex flex-col gap-3 relative animate-in fade-in slide-in-from-top-2">
+                <div className="flex items-start gap-4">
+                  <div className="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center shrink-0">
+                    <AlertTriangle className="w-4 h-4 text-orange-500" />
+                  </div>
+                  <div className="flex-1 pr-6">
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide mb-0.5">Scanner Notice</h4>
+                    <p className="text-xs font-medium text-slate-600 leading-normal">{scanError}</p>
+                  </div>
+                  <button 
+                    onClick={() => setScanError(null)} 
+                    className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition-colors p-1 hover:bg-orange-100/50 rounded-lg"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
-                <div className="flex-1 pr-6">
-                  <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide mb-0.5">Scanner Notice</h4>
-                  <p className="text-xs font-medium text-slate-600 leading-normal">{scanError}</p>
-                </div>
-                <button 
-                  onClick={() => setScanError(null)} 
-                  className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition-colors p-1 hover:bg-orange-100/50 rounded-lg"
-                >
-                  <X className="w-4 h-4" />
-                </button>
               </div>
             )}
 
@@ -1735,19 +1930,115 @@ export default function App() {
               {scannedProduct.image ? (
                 <img src={scannedProduct.image} alt="Product" className="w-28 h-28 object-cover rounded-3xl shadow-lg border-4 border-white shrink-0" referrerPolicy="no-referrer" />
               ) : (
-                <div className="w-28 h-28 bg-slate-50 rounded-3xl flex items-center justify-center text-slate-200 border-4 border-white shrink-0 shadow-inner"><Barcode className="w-14 h-14" /></div>
+                <div className="w-28 h-28 bg-slate-50 rounded-3xl flex items-center justify-center text-slate-200 border-4 border-white shrink-0 shadow-inner">
+                  {scannedProduct.barcode === 'MANUAL' ? (
+                    <Sparkles className="w-14 h-14 text-violet-400" />
+                  ) : (
+                    <Barcode className="w-14 h-14" />
+                  )}
+                </div>
               )}
               <div className="flex-1 min-w-0">
                 <h3 className="text-3xl font-bold text-slate-800 leading-tight mb-2 truncate">{scannedProduct.name}</h3>
                 <p className="text-sm uppercase tracking-widest text-slate-400 font-bold mb-4">{scannedProduct.brand}</p>
                 <div className="flex flex-wrap gap-2">
-                  {scannedProduct.allergens?.map((alg, i) => <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[11px] font-black uppercase tracking-wider rounded-xl">{alg}</span>)}
+                  {scannedProduct.barcode === 'MANUAL' && (
+                    <span className="px-3 py-1.5 bg-violet-100 text-violet-700 text-[10px] font-black uppercase tracking-wider rounded-xl flex items-center gap-1">
+                      <Sparkles className="w-3 h-3 animate-pulse" />
+                      AI Organized
+                    </span>
+                  )}
+                  {scannedProduct.allergens?.map((alg, i) => (
+                    <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[10px] font-black uppercase tracking-wider rounded-xl">
+                      {alg}
+                    </span>
+                  ))}
                 </div>
               </div>
             </div>
-            <div className="p-8 bg-sky-50/50 rounded-[2.5rem] border-4 border-white shadow-inner">
-              <p className="text-sm font-medium text-slate-600 leading-relaxed line-clamp-4">{scannedProduct.ingredientsText}</p>
-            </div>
+            
+            {(!scannedProduct.ingredientsList || scannedProduct.ingredientsList.length === 0) ? (
+              <div className="bg-gradient-to-br from-violet-50 to-indigo-50/75 p-6 rounded-[2rem] border-2 border-indigo-100/50 text-center space-y-4">
+                <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+                  <Sparkles className="w-6 h-6 animate-pulse" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-slate-800">No ingredients list found</h4>
+                  <p className="text-xs text-slate-500 font-medium mt-1 leading-relaxed">
+                    Quick-Scan packaging back with AI to instantly translate, register & cross-check ingredients!
+                  </p>
+                </div>
+                <label className="inline-flex bg-indigo-600 hover:bg-indigo-700 text-white py-3 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-md items-center gap-2">
+                  {isVisionAnalyzingIngredients ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Analyzing package...
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-4 h-4" />
+                      Scan Back of Package
+                    </>
+                  )}
+                  <input 
+                    type="file" 
+                    accept="image/*" 
+                    capture="environment" 
+                    onChange={handleScanIngredientsForScannedProduct}
+                    className="hidden" 
+                    disabled={isVisionAnalyzingIngredients}
+                  />
+                </label>
+                {visionIngredientsError && (
+                  <p className="text-[10px] text-orange-500 font-bold">{visionIngredientsError}</p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="p-8 bg-sky-50/50 rounded-[2.5rem] border-4 border-white shadow-inner relative overflow-hidden">
+                  <div className="flex justify-between items-center mb-2">
+                    <p className="text-sm font-semibold text-slate-500 uppercase tracking-widest text-[9px]">Verdict Ingredients Text</p>
+                    <label className="text-[10px] font-black text-indigo-505 hover:text-indigo-600 cursor-pointer flex items-center gap-1 text-indigo-500">
+                      <Camera className="w-3.5 h-3.5" /> Re-scan Package Back
+                      <input 
+                        type="file" 
+                        accept="image/*" 
+                        capture="environment" 
+                        onChange={handleScanIngredientsForScannedProduct}
+                        className="hidden" 
+                        disabled={isVisionAnalyzingIngredients}
+                      />
+                    </label>
+                  </div>
+                  <p className="text-sm font-medium text-slate-600 leading-relaxed line-clamp-4">{scannedProduct.ingredientsText}</p>
+                  {isVisionAnalyzingIngredients && (
+                    <div className="absolute inset-0 bg-white/80 flex items-center justify-center gap-3">
+                      <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
+                      <span className="text-xs font-bold text-slate-700">Analyzing scan...</span>
+                    </div>
+                  )}
+                </div>
+                {visionIngredientsError && (
+                  <p className="text-[10px] text-orange-500 font-bold px-4">{visionIngredientsError}</p>
+                )}
+              </div>
+            )}
+
+            {scannedProduct.ingredientsList && scannedProduct.ingredientsList.length > 0 && (
+              <div className="space-y-3">
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-violet-500 animate-pulse" />
+                  Organized Ingredients ({scannedProduct.ingredientsList.length})
+                </h4>
+                <div className="bg-slate-50 rounded-[2rem] p-6 border-2 border-slate-150 flex flex-wrap gap-2 max-h-40 overflow-y-auto scrollbar-thin">
+                  {scannedProduct.ingredientsList.map((ing, i) => (
+                    <span key={i} className="px-3 py-1.5 bg-white text-slate-600 text-xs font-bold rounded-2xl border border-slate-200/50 shadow-sm hover:border-violet-300 transition-colors">
+                      {ing}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             
             <div className="space-y-4">
               <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest ml-4">How did it feel? (Optional notes)</label>
@@ -2461,74 +2752,136 @@ export default function App() {
                 </div>
 
                 {/* Ingredients & Allergens */}
-                {(((selectedLogItem.ingredientsList && selectedLogItem.ingredientsList.length > 0) || (selectedLogItem.allergens && selectedLogItem.allergens.length > 0))) && (
-                  <div className="space-y-4 border-t border-dashed border-slate-100 pt-6 mb-8">
-                    {selectedLogItem.allergens && selectedLogItem.allergens.length > 0 && (
-                      <div className="space-y-2">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 animate-pulse">Flagged Allergens</span>
-                        <div className="flex flex-wrap gap-1.5">
-                          {(selectedLogItem.allergens || []).map((alg, i) => (
-                            <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[10px] font-black uppercase tracking-wider rounded-xl">
-                              {alg}
-                            </span>
-                          ))}
-                        </div>
+                <div className="space-y-4 border-t border-dashed border-slate-100 pt-6 mb-8 text-left">
+                  {selectedLogItem.allergens && selectedLogItem.allergens.length > 0 && (
+                    <div className="space-y-2">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 animate-pulse">Flagged Allergens</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(selectedLogItem.allergens || []).map((alg, i) => (
+                          <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[10px] font-black uppercase tracking-wider rounded-xl">
+                            {alg}
+                          </span>
+                        ))}
                       </div>
-                    )}
+                    </div>
+                  )}
 
-                    {selectedLogItem.ingredientsList && selectedLogItem.ingredientsList.length > 0 && (
-                      <div className="space-y-3">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">
+                  {!selectedLogItem.ingredientsList || selectedLogItem.ingredientsList.length === 0 ? (
+                    <div className="bg-gradient-to-br from-violet-50 to-indigo-50/75 p-6 rounded-[2rem] border-2 border-indigo-100/50 text-center space-y-4 my-2 relative overflow-hidden">
+                      <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+                        <Sparkles className="w-6 h-6 animate-pulse" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-slate-800">No ingredients registered yet</h4>
+                        <p className="text-xs text-slate-500 font-medium mt-1 leading-relaxed">
+                          Snap the back of the package ingredients list with AI to automatically retrieve and translate details!
+                        </p>
+                      </div>
+                      <label className="inline-flex bg-indigo-600 hover:bg-indigo-700 text-white py-3.5 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-md items-center gap-2">
+                        {isVisionAnalyzingIngredients ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Analyzing packaging...
+                          </>
+                        ) : (
+                          <>
+                            <Camera className="w-4 h-4" />
+                            Scan Back of Package
+                          </>
+                        )}
+                        <input 
+                          type="file" 
+                          accept="image/*" 
+                          capture="environment" 
+                          onChange={(e) => handleScanIngredientsForLog(e, selectedLogItem.id)}
+                          className="hidden" 
+                          disabled={isVisionAnalyzingIngredients}
+                        />
+                      </label>
+                      {visionIngredientsError && (
+                        <p className="text-[10px] text-orange-500 font-bold mt-2">{visionIngredientsError}</p>
+                      )}
+                      {isVisionAnalyzingIngredients && (
+                        <div className="absolute inset-0 bg-white/85 flex items-center justify-center gap-3">
+                          <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
+                          <span className="text-xs font-bold text-slate-700">Extracting ingredients...</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3 relative overflow-hidden">
+                      <div className="flex justify-between items-center ml-1">
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
                           Cross-Checked Ingredients ({selectedLogItem.ingredientsList.length})
                         </span>
-                        
-                        {/* Table Layout */}
-                        <div className="border border-slate-150 rounded-2xl overflow-hidden bg-white shadow-sm max-h-[220px] overflow-y-auto scrollbar-thin">
-                          <table className="w-full text-left border-collapse text-xs">
-                            <thead>
-                              <tr className="bg-slate-50 border-b border-slate-150 text-[9px] font-black uppercase text-slate-400 tracking-wider">
-                                <th className="px-4 py-3">Ingredient</th>
-                                <th className="px-4 py-3 text-right">Family / Status</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100">
-                              {(selectedLogItem.ingredientsList || []).map((ing, k) => {
-                                const allergen = isTypicalAllergen(ing);
-                                return (
-                                  <tr 
-                                    key={k} 
-                                    className={`transition-colors hover:bg-slate-50/50 ${allergen ? 'bg-orange-50/50 hover:bg-orange-50' : ''}`}
-                                  >
-                                    <td className="px-4 py-2.5 font-bold text-slate-700 capitalize leading-relaxed">
-                                      {allergen ? (
-                                        <span className="text-orange-700 font-extrabold flex items-center gap-1.5">
-                                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-orange-500" /> {ing}
-                                        </span>
-                                      ) : (
-                                        <span className="text-slate-600 font-medium">{ing}</span>
-                                      )}
-                                    </td>
-                                    <td className="px-4 py-2.5 text-right font-semibold">
-                                      {allergen ? (
-                                        <span className="inline-block bg-orange-100 text-orange-600 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg">
-                                          ⚠️ Allergen
-                                        </span>
-                                      ) : (
-                                        <span className="inline-block bg-slate-100 text-slate-405 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg text-slate-400">
-                                          Ok
-                                        </span>
-                                      )}
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
+                        <label className="text-[10px] font-black text-indigo-505 hover:text-indigo-600 cursor-pointer flex items-center gap-1 text-indigo-500">
+                          <Camera className="w-3.5 h-3.5" /> Re-scan
+                          <input 
+                            type="file" 
+                            accept="image/*" 
+                            capture="environment" 
+                            onChange={(e) => handleScanIngredientsForLog(e, selectedLogItem.id)}
+                            className="hidden" 
+                            disabled={isVisionAnalyzingIngredients}
+                          />
+                        </label>
                       </div>
-                    )}
-                  </div>
-                )}
+                      
+                      {/* Table Layout */}
+                      <div className="border border-slate-150 rounded-2xl overflow-hidden bg-white shadow-sm max-h-[220px] overflow-y-auto scrollbar-thin">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 border-b border-slate-150 text-[9px] font-black uppercase text-slate-400 tracking-wider">
+                              <th className="px-4 py-3">Ingredient</th>
+                              <th className="px-4 py-3 text-right">Family / Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {(selectedLogItem.ingredientsList || []).map((ing, k) => {
+                              const allergen = isTypicalAllergen(ing);
+                              return (
+                                <tr 
+                                  key={k} 
+                                  className={`transition-colors hover:bg-slate-50/50 ${allergen ? 'bg-orange-50/50 hover:bg-orange-50' : ''}`}
+                                >
+                                  <td className="px-4 py-2.5 font-bold text-slate-700 capitalize leading-relaxed">
+                                    {allergen ? (
+                                      <span className="text-orange-700 font-extrabold flex items-center gap-1.5">
+                                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-orange-500" /> {ing}
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-600 font-medium">{ing}</span>
+                                    )}
+                                  </td>
+                                  <td className="px-4 py-2.5 text-right font-semibold">
+                                    {allergen ? (
+                                      <span className="inline-block bg-orange-100 text-orange-600 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg">
+                                        ⚠️ Allergen
+                                      </span>
+                                    ) : (
+                                      <span className="inline-block bg-slate-100 text-slate-405 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg text-slate-400 font-bold">
+                                        Ok
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      {isVisionAnalyzingIngredients && (
+                        <div className="absolute inset-0 bg-white/85 flex items-center justify-center gap-3 z-10 rounded-2xl">
+                          <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
+                          <span className="text-xs font-bold text-slate-700">Updating log details...</span>
+                        </div>
+                      )}
+                      {visionIngredientsError && (
+                        <p className="text-[10px] text-orange-500 font-bold ml-1 mt-2">{visionIngredientsError}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
 
                 {/* Footer Buttons: Delete / Close */}
                 <div className="flex gap-4 border-t border-slate-50 pt-6">
