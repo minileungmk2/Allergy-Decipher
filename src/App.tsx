@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import appLogo from './assets/images/AllerScan Logo.jpeg';
+import appLogo from './assets/images/AllerScan_Logo.jpeg';
 
 // --- Transparent Image Helper Component to remove White Background dynamically ---
 const TransparentImage = React.forwardRef<HTMLImageElement, React.ImgHTMLAttributes<HTMLImageElement>>(({ src, alt, className, ...props }, ref) => {
