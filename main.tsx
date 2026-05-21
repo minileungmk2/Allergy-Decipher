@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   ShieldCheck, 
   Barcode, 
@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import appLogo from './assets/images/AllerScan Logo.jpeg';
+import appLogo from './assets/images/AllerScan_Logo.jpeg';
 
 // --- Transparent Image Helper Component to remove White Background dynamically ---
 const TransparentImage = React.forwardRef<HTMLImageElement, React.ImgHTMLAttributes<HTMLImageElement>>(({ src, alt, className, ...props }, ref) => {
@@ -249,6 +249,7 @@ const COMMON_FILLERS = [
 ];
 
 const normalizeIngredientName = (name: string): string => {
+  if (!name || typeof name !== 'string') return '';
   let cleaned = name.toLowerCase().trim();
   
   // Strip common packaging / status prefixes
@@ -286,8 +287,38 @@ const normalizeIngredientName = (name: string): string => {
 };
 
 const isTypicalAllergen = (ingredient: string): boolean => {
+  if (!ingredient || typeof ingredient !== 'string') return false;
   const norm = ingredient.toLowerCase().trim();
   return TYPICAL_ALLERGENS.some(allergen => norm.includes(allergen) || allergen.includes(norm));
+};
+
+const getTimestamp = (item: ProductLog): number => {
+  if (!item) return 0;
+  const numId = Number(item.id);
+  if (!isNaN(numId)) return numId;
+  if (item.date) {
+    const parts = item.date.split('-');
+    if (parts.length === 3) {
+      const d = new Date(item.date);
+      if (!isNaN(d.getTime())) return d.getTime();
+    }
+    const slashParts = item.date.split('/');
+    if (slashParts.length === 3) {
+      const p0 = parseInt(slashParts[0], 10);
+      if (p0 > 12) {
+        // DD/MM/YYYY
+        const d = new Date(`${slashParts[1]}/${slashParts[0]}/${slashParts[2]}`);
+        if (!isNaN(d.getTime())) return d.getTime();
+      } else {
+        // MM/DD/YYYY
+        const d = new Date(`${slashParts[0]}/${slashParts[1]}/${slashParts[2]}`);
+        if (!isNaN(d.getTime())) return d.getTime();
+      }
+    }
+    const parsed = new Date(item.date).getTime();
+    if (!isNaN(parsed)) return parsed;
+  }
+  return 0;
 };
 
 const DEFAULT_HISTORY_SEED: ProductLog[] = [
@@ -420,6 +451,10 @@ export default function App() {
   const [scanner, setScanner] = useState<Html5Qrcode | null>(null);
   const [scannedProduct, setScannedProduct] = useState<Partial<ProductLog> | null>(null);
   const [scannerMode, setScannerMode] = useState<'capture' | 'auto'>('capture');
+  const [scanMethod, setScanMethod] = useState<'mobile' | 'live'>(() => {
+    const isMobile = typeof window !== "undefined" && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+    return isMobile ? 'mobile' : 'live';
+  });
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [shutterActive, setShutterActive] = useState<boolean>(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -652,6 +687,8 @@ export default function App() {
 
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [isVisionAnalyzingIngredients, setIsVisionAnalyzingIngredients] = useState(false);
+  const [visionIngredientsError, setVisionIngredientsError] = useState<string | null>(null);
 
   const stopVideoStream = () => {
     if (videoStreamRef.current) {
@@ -670,49 +707,104 @@ export default function App() {
     setScanning(false);
   };
 
+  const bindVideoRef = useCallback((node: HTMLVideoElement | null) => {
+    (videoRef as any).current = node;
+
+    if (node && videoStreamRef.current) {
+      console.log("Video element mounted, assigning stream:", videoStreamRef.current.id);
+      try {
+        node.srcObject = videoStreamRef.current;
+        node.muted = true;
+        // Set playsInline as attribute directly or as property
+        node.setAttribute('playsinline', 'true');
+        node.playsInline = true;
+        node.play().then(() => {
+          console.log("Video play stream successful under callback ref.");
+        }).catch(e => {
+          console.warn("Video element failed auto-play on callback ref, trying to trigger directly:", e);
+          // Try manual playback
+          node.muted = true;
+          node.play().catch(pErr => console.warn("Retry playback failed:", pErr));
+        });
+      } catch (err) {
+        console.error("Failed to assign stream to video element:", err);
+      }
+    }
+  }, []);
+
   const startVideoStream = async () => {
     stopVideoStream();
     setCameraError(null);
     setScannedProduct(null);
 
-    try {
-      const constraints = {
+    // Sequence of fallback constraints to maximize hardware compatibility
+    const constraintOptions = [
+      {
         video: {
-          facingMode: "environment",
+          facingMode: { ideal: "environment" },
           width: { ideal: 1280 },
           height: { ideal: 720 }
         },
         audio: false
-      };
+      },
+      {
+        video: {
+          facingMode: "environment"
+        },
+        audio: false
+      },
+      {
+        video: true,
+        audio: false
+      }
+    ];
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    let stream: MediaStream | null = null;
+    let fallbackError: any = null;
+
+    for (const constraints of constraintOptions) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (stream) {
+          console.log("Successfully acquired camera stream with constraints:", constraints);
+          break;
+        }
+      } catch (err) {
+        console.warn("Camera constraint attempt failed:", constraints, err);
+        fallbackError = err;
+      }
+    }
+
+    if (!stream) {
+      console.error("All media track acquisition attempts failed:", fallbackError);
+      let msg = "Failed to access camera.";
+      if (fallbackError?.name === "NotAllowedError" || fallbackError?.message?.includes("Permission")) {
+        msg = "Camera permission denied. Please allow camera access in your browser settings.";
+      } else if (fallbackError?.name === "NotFoundError" || fallbackError?.message?.includes("NotFound")) {
+        msg = "No suitable camera found on this device.";
+      } else if (fallbackError?.message) {
+        msg = fallbackError.message;
+      }
+      setCameraError(msg);
+      setScanning(false);
+      return;
+    }
+
+    try {
       videoStreamRef.current = stream;
       setScanning(true);
 
-      // Force video play on ref mount
-      let attempts = 0;
-      const bindStream = () => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play().catch(e => console.error("Video stream playback failure", e));
-        } else if (attempts < 15) {
-          attempts++;
-          setTimeout(bindStream, 150);
-        }
-      };
-      bindStream();
-
-    } catch (err: any) {
-      console.error("Custom video hardware acquisition failed:", err);
-      let msg = "Failed to access camera.";
-      if (err?.name === "NotAllowedError" || err?.message?.includes("Permission")) {
-        msg = "Camera permission denied. Please allow camera access in your browser settings.";
-      } else if (err?.name === "NotFoundError" || err?.message?.includes("NotFound")) {
-        msg = "No environment / back camera found.";
-      } else if (err?.message) {
-        msg = err.message;
+      // Explicitly set stream on ref if video is already rendered
+      if (videoRef.current) {
+        console.log("Video ref already available, assigning stream immediately.");
+        videoRef.current.srcObject = stream;
+        videoRef.current.muted = true;
+        videoRef.current.playsInline = true;
+        videoRef.current.play().catch(e => console.warn("videoRef playback failed:", e));
       }
-      setCameraError(msg);
+    } catch (err: any) {
+      console.error("Failed to associate video stream elements:", err);
+      setCameraError(err.message || "Association with camera display failed.");
       setScanning(false);
     }
   };
@@ -821,6 +913,44 @@ export default function App() {
     setScanning(false);
   };
 
+  const scanFileBarcode = async (file: File): Promise<string> => {
+    // Generate a guaranteed unique element ID to avoid html5-qrcode instance collisions
+    const randId = `file-scanner-${Math.random().toString(36).substring(2, 11)}`;
+    const container = document.createElement('div');
+    container.id = randId;
+    container.style.display = 'none';
+    document.body.appendChild(container);
+
+    const tempScanner = new Html5Qrcode(randId, {
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.UPC_A,
+        Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.EAN_13,
+        Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.CODE_39,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.ITF
+      ],
+      verbose: false
+    });
+
+    try {
+      const decodedText = await tempScanner.scanFile(file, false);
+      try {
+        await tempScanner.clear();
+      } catch (_) {}
+      container.remove();
+      return decodedText;
+    } catch (err) {
+      try {
+        await tempScanner.clear();
+      } catch (_) {}
+      container.remove();
+      throw err;
+    }
+  };
+
   const captureAndScan = async () => {
     if (!videoRef.current || isCapturing) return;
     setIsCapturing(true);
@@ -843,71 +973,348 @@ export default function App() {
         throw new Error("Could not acquire 2D drawing context.");
       }
       
-      // Draw frame
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      
-      // Convert to blob and trigger Html5Qrcode scanFile
-      canvas.toBlob(async (blob) => {
-        if (!blob) {
-          setIsCapturing(false);
-          setScanError("Oops! Failed to capture picture snapshot. Please try again.");
-          return;
-        }
 
-        const imageFile = new File([blob], "picture-barcode.png", { type: "image/png" });
+      const tryScanBlob = (blob: Blob) => {
+        const file = new File([blob], "temp-scan.png", { type: "image/png" });
+        return scanFileBarcode(file);
+      };
 
-        const formatsToSupport = [
-          Html5QrcodeSupportedFormats.QR_CODE,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.CODE_39,
-          Html5QrcodeSupportedFormats.CODE_128,
-          Html5QrcodeSupportedFormats.ITF
-        ];
+      const getBlobFromCanvas = (c: HTMLCanvasElement): Promise<Blob> => {
+        return new Promise((resolve, reject) => {
+          c.toBlob((b) => {
+            if (b) resolve(b);
+            else reject(new Error("Blob drawing empty"));
+          }, "image/png");
+        });
+      };
 
-        try {
-          const tempScanner = new Html5Qrcode("hidden-reader", {
-            formatsToSupport,
-            verbose: false
-          });
+      // Create cropped 1 (horizontal center strip - 80% width, 30% height of canvas)
+      const cropX1 = Math.floor(canvas.width * 0.1);
+      const cropY1 = Math.floor(canvas.height * 0.35);
+      const cropW1 = Math.floor(canvas.width * 0.8);
+      const cropH1 = Math.floor(canvas.height * 0.3);
 
-          tempScanner.scanFile(imageFile, false)
-            .then(async (decodedText) => {
-              console.log("Barcode match found on frozen frame:", decodedText);
-              
-              try {
-                await tempScanner.clear();
-              } catch (_) {}
+      const canvasBand = document.createElement('canvas');
+      canvasBand.width = cropW1;
+      canvasBand.height = cropH1;
+      const ctxBand = canvasBand.getContext('2d');
+      if (ctxBand) {
+        ctxBand.drawImage(canvas, cropX1, cropY1, cropW1, cropH1, 0, 0, cropW1, cropH1);
+      }
 
-              // Stop camera and trigger the search automatically
-              stopVideoStream();
-              setIsCapturing(false);
-              await fetchProduct(decodedText);
-            })
-            .catch(async (err) => {
-              console.warn("Scan mismatch/failure on static image:", err);
-              
-              try {
-                await tempScanner.clear();
-              } catch (_) {}
+      // Create cropped 2 (square center - 50% width and 50% height)
+      const cropW2 = Math.floor(canvas.width * 0.5);
+      const cropH2 = Math.floor(canvas.height * 0.5);
+      const cropX2 = Math.floor((canvas.width - cropW2) / 2);
+      const cropY2 = Math.floor((canvas.height - cropH2) / 2);
 
-              setScanError("No barcode detected. Ensure the code is centered and illuminated, then click Capture again.");
-              setIsCapturing(false);
-            });
-        } catch (err: any) {
-          console.error("Temporary scanner instantiation failed:", err);
-          setScanError("Scanner start failure: " + (err.message || err));
-          setIsCapturing(false);
-        }
-      }, "image/png");
+      const canvasSquare = document.createElement('canvas');
+      canvasSquare.width = cropW2;
+      canvasSquare.height = cropH2;
+      const ctxSquare = canvasSquare.getContext('2d');
+      if (ctxSquare) {
+        ctxSquare.drawImage(canvas, cropX2, cropY2, cropW2, cropH2, 0, 0, cropW2, cropH2);
+      }
+
+      // Step 1: Try Horizontal Band Crop (Fantastic for long, thin 1D barcodes)
+      try {
+        console.log("Strategy 1: Trying center strip crop...");
+        const bandBlob = await getBlobFromCanvas(canvasBand);
+        const codeText = await tryScanBlob(bandBlob);
+        console.log("Success with Strategy 1 (strip):", codeText);
+        stopVideoStream();
+        setIsCapturing(false);
+        await fetchProduct(codeText);
+        return;
+      } catch (err) {
+        console.warn("Strategy 1 failed:", err);
+      }
+
+      // Step 2: Try Square Crop (Great for 2D/QR codes or centered codes)
+      try {
+        console.log("Strategy 2: Trying center square crop...");
+        const squareBlob = await getBlobFromCanvas(canvasSquare);
+        const codeText = await tryScanBlob(squareBlob);
+        console.log("Success with Strategy 2 (square):", codeText);
+        stopVideoStream();
+        setIsCapturing(false);
+        await fetchProduct(codeText);
+        return;
+      } catch (err) {
+        console.warn("Strategy 2 failed:", err);
+      }
+
+      // Step 3: Try Full Canvas Frame (Classic fallback)
+      try {
+        console.log("Strategy 3: Trying full canvas frame fallback...");
+        const fullBlob = await getBlobFromCanvas(canvas);
+        const codeText = await tryScanBlob(fullBlob);
+        console.log("Success with Strategy 3 (full frame):", codeText);
+        stopVideoStream();
+        setIsCapturing(false);
+        await fetchProduct(codeText);
+        return;
+      } catch (err) {
+        console.error("Strategy 3 failed:", err);
+        setScanError("No barcode detected. Ensure the code is flat, well-lit, aligned inside the viewfinder guidelines, and try scanning again. Or use manual search below!");
+        setIsCapturing(false);
+      }
 
     } catch (err: any) {
       console.error("Canvas snapshot error:", err);
       setScanError("Failed to freeze camera frame. Please try again.");
       setIsCapturing(false);
     }
+  };
+
+  const analyzeWithAIVision = async (base64Image: string) => {
+    setLoading(true);
+    setScannedProduct(null);
+    setScanError(null);
+    try {
+      console.log("Analyzing label/photo with Gemini Vision...");
+      const res = await fetch("/api/gemini/analyze-photo", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ image: base64Image })
+      });
+
+      if (!res.ok) {
+        throw new Error(`AI parse request failed with status ${res.status}`);
+      }
+
+      const data = await res.json();
+      console.log("AI Vision Parsing Output:", data);
+
+      if (data.success && data.productDetails) {
+        stopVideoStream();
+        
+        const hasBarcode = data.detectedBarcode && data.detectedBarcode.trim() !== "";
+        
+        // Structure the parsed ingredients and allergen components
+        setScannedProduct({
+          barcode: hasBarcode ? data.detectedBarcode : "MANUAL",
+          name: data.productDetails.name || "AI Discovered Item",
+          brand: data.productDetails.brand || "AI Label Scanner",
+          ingredientsText: data.productDetails.ingredientsText || "Ingredients not listed.",
+          ingredientsList: data.productDetails.ingredientsList || [],
+          allergens: data.productDetails.allergens || [],
+          image: "" // Scanned by AI
+        });
+
+        // Automatically prefill input with whatever identity we got
+        const labelToFill = data.detectedBarcode || data.detectedTextSearch || data.productDetails.name;
+        const searchBox = document.getElementById('manual-input') as HTMLInputElement;
+        if (searchBox && labelToFill) {
+          searchBox.value = labelToFill;
+        }
+      } else if (data.detectedBarcode && data.detectedBarcode.trim() !== "") {
+        console.log("Only barcode identifier code found:", data.detectedBarcode);
+        await fetchProduct(data.detectedBarcode);
+      } else {
+        setScanError("AI was unable to clearly locate any ingredient label details or barcodes. Try snapping a closer, more flat & highly illuminated label photo.");
+      }
+    } catch (err: any) {
+      console.error("AI Analysis Error:", err);
+      setScanError("Advanced AI OCR parser service error: " + (err.message || err));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const captureAndScanAI = async () => {
+    if (!videoRef.current || isCapturing) return;
+    setIsCapturing(true);
+    setScanError(null);
+
+    // Visual camera snapshot flash animation
+    setShutterActive(true);
+    setTimeout(() => setShutterActive(false), 200);
+
+    try {
+      const video = videoRef.current;
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
+
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        throw new Error("Could not acquire canvas drawing context.");
+      }
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const base64 = canvas.toDataURL('image/png');
+      setIsCapturing(false);
+      await analyzeWithAIVision(base64);
+    } catch (err: any) {
+      console.error("AI Frame capture error:", err);
+      setScanError("Could not snap camera frame: " + (err.message || err));
+      setIsCapturing(false);
+    }
+  };
+
+  const handleAIScanUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setLoading(true);
+      setScanError(null);
+      
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const base64 = reader.result as string;
+        try {
+          console.log("Parsing barcode client-side with native scanner engine...");
+          const barcodeData = await scanFileBarcode(file);
+          console.log("Found direct barcode match:", barcodeData);
+          await fetchProduct(barcodeData);
+        } catch (clientErr) {
+          console.log("Traditional scanning failed, resolving using high-fidelity barcode visual parsing...");
+          try {
+            const res = await fetch("/api/gemini/analyze-photo", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ image: base64 })
+            });
+
+            if (!res.ok) {
+              throw new Error(`Parse failed with status ${res.status}`);
+            }
+
+            const data = await res.json();
+            if (data.success && data.detectedBarcode) {
+              console.log("Barcode extracted correctly:", data.detectedBarcode);
+              await fetchProduct(data.detectedBarcode);
+            } else if (data.success && data.productDetails) {
+              stopVideoStream();
+              setScannedProduct({
+                barcode: data.detectedBarcode || "MANUAL",
+                name: data.productDetails.name || "Custom Item",
+                brand: data.productDetails.brand || "Custom Scanner",
+                ingredientsText: data.productDetails.ingredientsText || "Ingredients not listed.",
+                ingredientsList: data.productDetails.ingredientsList || [],
+                allergens: data.productDetails.allergens || [],
+                image: ""
+              });
+            } else {
+              setScanError("No barcode found in photo. Ensure the code is clear, highly illuminated, and try scanning again. Or enter manually!");
+            }
+          } catch (apiErr: any) {
+            console.error("Advanced OCR extract issue:", apiErr);
+            setScanError("No barcode detected in image. Please try a closer, well-lit photo of the barcode lines.");
+          } finally {
+            setLoading(false);
+          }
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleScanIngredientsForLog = async (e: React.ChangeEvent<HTMLInputElement>, logId: string) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsVisionAnalyzingIngredients(true);
+    setVisionIngredientsError(null);
+    
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      try {
+        const base64 = reader.result as string;
+        const res = await fetch("/api/gemini/analyze-photo", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ image: base64 })
+        });
+
+        if (!res.ok) {
+          throw new Error("AI parser failed with status: " + res.status);
+        }
+
+        const data = await res.json();
+        if (data.success && data.productDetails) {
+          const updatedHistory = history.map(h => {
+            if (h.id === logId) {
+              return {
+                ...h,
+                ingredientsText: data.productDetails.ingredientsText || h.ingredientsText,
+                ingredientsList: data.productDetails.ingredientsList || h.ingredientsList,
+                allergens: data.productDetails.allergens || h.allergens,
+                name: h.name === "Unknown Product" || !h.name ? (data.productDetails.name || h.name) : h.name,
+                brand: h.brand === "Unknown Brand" || !h.brand ? (data.productDetails.brand || h.brand) : h.brand,
+              };
+            }
+            return h;
+          });
+          setHistory(updatedHistory);
+          await saveData(profiles, updatedHistory);
+        } else {
+          setVisionIngredientsError("AI wasn't able to extract ingredients label details. Ensure you take a direct, high-quality, flat photo of the ingredients list.");
+        }
+      } catch (err: any) {
+        console.error("AI ingredient auto-register error:", err);
+        setVisionIngredientsError("Failed to auto-register ingredients: " + (err.message || err));
+      } finally {
+        setIsVisionAnalyzingIngredients(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleScanIngredientsForScannedProduct = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsVisionAnalyzingIngredients(true);
+    setVisionIngredientsError(null);
+    
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      try {
+        const base64 = reader.result as string;
+        const res = await fetch("/api/gemini/analyze-photo", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ image: base64 })
+        });
+
+        if (!res.ok) {
+          throw new Error("AI parser failed with status: " + res.status);
+        }
+
+        const data = await res.json();
+        if (data.success && data.productDetails) {
+          setScannedProduct(prev => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              ingredientsText: data.productDetails.ingredientsText || prev.ingredientsText,
+              ingredientsList: data.productDetails.ingredientsList || prev.ingredientsList,
+              allergens: data.productDetails.allergens || prev.allergens,
+              name: prev.name === "Unknown Product" || !prev.name ? (data.productDetails.name || prev.name) : prev.name,
+              brand: prev.brand === "Unknown Brand" || !prev.brand ? (data.productDetails.brand || prev.brand) : prev.brand,
+            };
+          });
+        } else {
+          setVisionIngredientsError("AI wasn't able to extract ingredients label details. Ensure you take a direct, high-quality, flat photo of the ingredients list.");
+        }
+      } catch (err: any) {
+        console.error("AI ingredient auto-register error:", err);
+        setVisionIngredientsError("Failed to auto-register ingredients: " + (err.message || err));
+      } finally {
+        setIsVisionAnalyzingIngredients(false);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const fetchProduct = async (barcode: string) => {
@@ -957,10 +1364,16 @@ export default function App() {
     const newLog: ProductLog = {
       id: Date.now().toString(),
       profileId: activeProfile.id,
-      date: new Date().toLocaleDateString(),
+      date: new Date().toISOString().split('T')[0],
       reaction,
-      notes: scanNotes,
-      ...(scannedProduct as ProductLog)
+      notes: scanNotes || "",
+      name: scannedProduct.name || "Unknown Product",
+      brand: scannedProduct.brand || "Unknown Brand",
+      barcode: scannedProduct.barcode || "UNKNOWN",
+      ingredientsText: scannedProduct.ingredientsText || "Ingredients not listed.",
+      ingredientsList: scannedProduct.ingredientsList || [],
+      allergens: scannedProduct.allergens || [],
+      image: scannedProduct.image || ""
     };
 
     setHistory([newLog, ...history]);
@@ -980,7 +1393,7 @@ export default function App() {
     const newLog: ProductLog = {
       id: Date.now().toString(),
       profileId: activeProfile.id,
-      date: new Date().toLocaleDateString(),
+      date: new Date().toISOString().split('T')[0],
       reaction: manualReaction,
       name: manualName,
       brand: "Manual Entry",
@@ -1140,7 +1553,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (activeTab === 'scan') {
+    if (activeTab === 'scan' && scanMethod === 'live') {
       if (scannerMode === 'capture') {
         stopScanner();
         startVideoStream();
@@ -1157,7 +1570,7 @@ export default function App() {
       stopScanner();
       stopVideoStream();
     };
-  }, [activeTab, scannerMode]);
+  }, [activeTab, scannerMode, scanMethod]);
 
   // Trigger analysis automatically on tab change, profile change, or history updates to keep insights fully in sync
   useEffect(() => {
@@ -1353,49 +1766,18 @@ export default function App() {
   };
 
   const ScannerView = () => (
-    <div className="space-y-8">
-      {/* Premium Segmented Scanner Mode Toggle */}
-      <div className="bg-slate-150 p-1.5 rounded-[2.2rem] flex max-w-md mx-auto shadow-inner border border-slate-200/40 relative">
-        <button
-          onClick={() => setScannerMode('capture')}
-          type="button"
-          className={`flex-1 flex items-center justify-center gap-2 py-3 px-6 rounded-[1.7rem] text-xs font-black uppercase tracking-wider transition-all duration-300 ${
-            scannerMode === 'capture'
-              ? 'bg-white text-sky-600 shadow-lg shadow-slate-200/80 scale-[1.02]'
-              : 'text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <Camera className="w-4 h-4" />
-          Tap to Capture (Reliable)
-        </button>
-        <button
-          onClick={() => setScannerMode('auto')}
-          type="button"
-          className={`flex-1 flex items-center justify-center gap-2 py-3 px-6 rounded-[1.7rem] text-xs font-black uppercase tracking-wider transition-all duration-300 ${
-            scannerMode === 'auto'
-              ? 'bg-white text-sky-600 shadow-lg shadow-slate-200/80 scale-[1.02]'
-              : 'text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          <div className="w-2 h-2 bg-orange-400 rounded-full animate-pulse" />
-          Auto-Scan (Beta)
-        </button>
-      </div>
-
+    <div className="space-y-8 animate-in fade-in duration-300">
       <div className="bg-white rounded-[3.5rem] shadow-2xl overflow-hidden border-8 border-white relative">
-        <div className="p-6 bg-yellow-50 border-b border-yellow-100 flex justify-between items-center">
+        <div className="p-6 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
           <div className="flex items-center gap-3">
-            <div className={`w-4 h-4 rounded-full animate-pulse shadow-lg ${scannerMode === 'capture' ? 'bg-sky-400 shadow-sky-200' : 'bg-orange-400 shadow-orange-200'}`}></div>
-            <h3 className="text-sm font-bold text-slate-700 uppercase tracking-widest">
-              {scannerMode === 'capture' ? 'Snapshot Assistant' : 'Magic Eye Active'}
-            </h3>
+            <Camera className="w-5 h-5 text-indigo-600" />
+            <span className="text-xs font-black uppercase tracking-widest text-slate-550 text-slate-500">
+              Product Barcode Scanner
+            </span>
           </div>
-          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">
-            {scannerMode === 'capture' ? 'Tap To Snap' : 'Point & Find'}
-          </p>
         </div>
         
-        <div className="relative aspect-square sm:aspect-video bg-slate-150 flex items-center justify-center overflow-hidden">
+        <div className="relative aspect-square sm:aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
           {/* Shutter flash screen overlay */}
           {shutterActive && (
             <div className="absolute inset-0 bg-white z-50 pointer-events-none transition-opacity duration-150 opacity-100" />
@@ -1403,38 +1785,32 @@ export default function App() {
 
           {/* Guidelines Reticle */}
           <div className="absolute inset-0 pointer-events-none z-10">
-             <div className="absolute top-10 left-10 w-20 h-20 border-t-8 border-l-8 border-white/80 rounded-tl-[3rem]"></div>
-             <div className="absolute top-10 right-10 w-20 h-20 border-t-8 border-r-8 border-white/80 rounded-tr-[3rem]"></div>
-             <div className="absolute bottom-10 left-10 w-20 h-20 border-b-8 border-l-8 border-white/80 rounded-bl-[3rem]"></div>
-             <div className="absolute bottom-10 right-10 w-20 h-20 border-b-8 border-r-8 border-white/80 rounded-br-[3rem]"></div>
-             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 border-4 border-white/30 rounded-full animate-ping"></div>
+             <div className="absolute top-10 left-10 w-20 h-20 border-t-8 border-l-8 rounded-tl-[3rem] border-sky-500/85"></div>
+             <div className="absolute top-10 right-10 w-20 h-20 border-t-8 border-r-8 rounded-tr-[3rem] border-sky-500/85"></div>
+             <div className="absolute bottom-10 left-10 w-20 h-20 border-b-8 border-l-8 rounded-bl-[3rem] border-sky-500/85"></div>
+             <div className="absolute bottom-10 right-10 w-20 h-20 border-b-8 border-r-8 rounded-br-[3rem] border-sky-500/85"></div>
+             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 border-4 rounded-full animate-ping border-sky-500/20"></div>
           </div>
           
-          {scannerMode === 'capture' ? (
-            <video 
-              ref={videoRef}
-              playsInline
-              autoPlay
-              muted
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <div id="reader" ref={scannerRef} className="w-full h-full"></div>
-          )}
+          <video 
+            ref={bindVideoRef}
+            playsInline
+            autoPlay
+            muted
+            className="absolute inset-0 w-full h-full object-cover z-0"
+            style={{ display: 'block' }}
+          />
           
           {cameraError && (
              <div className="absolute inset-0 bg-white/95 flex flex-col items-center justify-center p-8 z-30 backdrop-blur-lg">
-               <div className="w-20 h-20 bg-orange-50 text-orange-500 rounded-[2rem] flex items-center justify-center mb-6">
-                 <AlertTriangle className="w-10 h-10" />
+               <div className="w-20 h-20 bg-slate-50 text-slate-400 rounded-[2rem] flex items-center justify-center mb-6">
+                 <Camera className="w-10 h-10 animate-pulse text-indigo-400" />
                </div>
-               <h3 className="text-xl font-bold text-slate-800 mb-2">Camera Access Ouchie</h3>
+               <h3 className="text-xl font-bold text-slate-800 mb-2">Camera Access Notice</h3>
                <p className="text-sm text-slate-400 font-bold mb-8 text-center">{cameraError}</p>
                <button 
-                 onClick={() => {
-                   if (scannerMode === 'capture') startVideoStream();
-                   else startScanner();
-                 }}
-                 className="bg-sky-500 text-white font-bold px-10 py-4 rounded-3xl shadow-xl bouncy animate-bounce"
+                 onClick={() => startVideoStream()}
+                 className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-10 py-4 rounded-3xl shadow-xl bouncy"
                >
                  Try Again
                </button>
@@ -1443,89 +1819,86 @@ export default function App() {
 
           {loading && (
             <div className="absolute inset-0 bg-white/90 flex flex-col items-center justify-center gap-6 z-20 backdrop-blur-md">
-              <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: 'linear' }} className="w-16 h-16 text-sky-500 rounded-full flex items-center justify-center"><Loader2 className="w-16 h-16" /></motion.div>
-              <p className="text-xl font-bold text-slate-800">Finding yummy details...</p>
+              <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: 'linear' }} className="w-16 h-16 text-indigo-600 rounded-full flex items-center justify-center">
+                <Loader2 className="w-16 h-16 animate-spin" />
+              </motion.div>
+              <p className="text-xl font-bold text-slate-800">Reading barcode...</p>
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest animate-pulse max-w-xs text-center">Looking up product statistics...</p>
             </div>
           )}
 
           {!scanning && !loading && !scannedProduct && !cameraError && (
             <div className="absolute inset-0 bg-white/50 backdrop-blur-sm flex flex-col items-center justify-center gap-6 z-20">
-              <div className="w-20 h-20 bg-sky-50 text-sky-500 rounded-[2rem] flex items-center justify-center shadow-inner">
+              <div className="w-20 h-20 bg-indigo-50 text-indigo-600 rounded-[2rem] flex items-center justify-center shadow-inner animate-pulse">
                 <Camera className="w-10 h-10" />
               </div>
               <button 
-                onClick={() => {
-                  if (scannerMode === 'capture') startVideoStream();
-                  else startScanner();
-                }}
-                className="bg-sky-500 text-white font-bold px-10 py-5 rounded-[2rem] shadow-2xl bouncy flex items-center gap-3 animate-pulse"
+                onClick={() => startVideoStream()}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-10 py-5 rounded-[2rem] shadow-2xl bouncy flex items-center gap-3"
               >
                 <div className="w-2 h-2 bg-white rounded-full animate-ping" />
-                Open Camera Feed
+                Open Live Scanner
               </button>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center px-10">Hold the frame steady when capturing</p>
-            </div>
-          )}
-
-          {!scanning && !loading && !scannedProduct && !cameraError && (
-            <div className="text-slate-300 text-center p-12 absolute z-0 pointer-events-none">
-              <Camera className="w-20 h-20 mx-auto mb-8 opacity-10" />
-              <p className="text-lg font-bold">Wake up the Camera Feed!</p>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center px-10">Hold standard barcode flat under coordinates reticle</p>
             </div>
           )}
         </div>
 
         {!loading && !scannedProduct && (
-          <div className="p-10 space-y-8 bg-white">
-            
-            {/* Capture button overlay for manual mode */}
-            {scannerMode === 'capture' && scanning && (
-              <div className="flex flex-col items-center justify-center pb-8 border-b border-slate-100 gap-3">
-                <button
-                  onClick={captureAndScan}
-                  disabled={isCapturing}
-                  type="button"
-                  className="w-full bg-gradient-to-r from-sky-500 to-indigo-505 bg-sky-500 hover:bg-sky-600 text-white font-black px-10 py-5 rounded-[2rem] shadow-xl hover:shadow-2xl disabled:bg-slate-300 active:scale-[0.98] transition-all flex items-center justify-center gap-3 bouncy"
-                >
-                  {isCapturing ? (
-                    <>
-                      <Loader2 className="w-6 h-6 animate-spin" />
-                      Freezing & Scanning Barcode...
-                    </>
-                  ) : (
-                    <>
-                      <Camera className="w-6 h-6" />
-                      CAPTURE & SCAN BARCODE
-                    </>
-                  )}
-                </button>
-                <p className="text-xs font-black text-sky-500 uppercase tracking-widest text-center">
-                  Align barcode horizontally & stay steady before tapping!
-                </p>
-              </div>
-            )}
+          <div className="p-10 space-y-6 bg-white">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <button
+                onClick={captureAndScan}
+                disabled={isCapturing || !scanning}
+                type="button"
+                className="bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-600 hover:to-indigo-700 text-white font-black px-6 py-5 rounded-[2rem] shadow-xl hover:shadow-2xl disabled:opacity-50 active:scale-[0.98] transition-all flex items-center justify-center gap-2 bouncy text-base"
+              >
+                {isCapturing ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Capturing...
+                  </>
+                ) : (
+                  <>
+                    <Camera className="w-5 h-5 animate-pulse" />
+                    Capture Frame
+                  </>
+                )}
+              </button>
 
-            <p className="text-xs text-center text-slate-400 font-bold uppercase tracking-widest">
-              {scannerMode === 'capture' 
-                ? "Align the barcode inside the target box and click Capture" 
-                : "Show the code to the Eye"}
+              <label className="bg-white hover:bg-slate-50 text-slate-700 border-2 border-slate-200 hover:border-indigo-200 font-bold px-6 py-5 rounded-[2rem] shadow-sm hover:shadow-md active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer text-sm duration-200 text-center">
+                <Camera className="w-4 h-4 text-indigo-600 animate-pulse" />
+                Manual Photo Upload
+                <input 
+                  type="file" 
+                  accept="image/*" 
+                  onChange={handleAIScanUpload}
+                  className="hidden" 
+                />
+              </label>
+            </div>
+
+            <p className="text-xs text-center text-slate-400 font-bold uppercase tracking-widest leading-relaxed">
+              Align barcode under scanner guidelines or upload a photo of the barcode to search standard EAN/UPC identifier.
             </p>
             
             {scanError && (
-              <div className="p-5 bg-orange-50 border border-orange-100 rounded-3xl flex items-start gap-4 relative animate-in fade-in slide-in-from-top-2">
-                <div className="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center shrink-0">
-                  <AlertTriangle className="w-4 h-4 text-orange-500" />
+              <div className="p-5 bg-orange-50 border border-orange-100 rounded-3xl flex flex-col gap-3 relative animate-in fade-in slide-in-from-top-2">
+                <div className="flex items-start gap-4">
+                  <div className="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center shrink-0">
+                    <AlertTriangle className="w-4 h-4 text-orange-500" />
+                  </div>
+                  <div className="flex-1 pr-6">
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide mb-0.5">Scanner Notice</h4>
+                    <p className="text-xs font-medium text-slate-600 leading-normal">{scanError}</p>
+                  </div>
+                  <button 
+                    onClick={() => setScanError(null)} 
+                    className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition-colors p-1 hover:bg-orange-100/50 rounded-lg"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
-                <div className="flex-1 pr-6">
-                  <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide mb-0.5">Scanner Notice</h4>
-                  <p className="text-xs font-medium text-slate-600 leading-normal">{scanError}</p>
-                </div>
-                <button 
-                  onClick={() => setScanError(null)} 
-                  className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition-colors p-1 hover:bg-orange-100/50 rounded-lg"
-                >
-                  <X className="w-4 h-4" />
-                </button>
               </div>
             )}
 
@@ -1573,22 +1946,141 @@ export default function App() {
         {scannedProduct && (
           <motion.div initial={{ y: 50, opacity: 0, scale: 0.95 }} animate={{ y: 0, opacity: 1, scale: 1 }} exit={{ y: 50, opacity: 0, scale: 0.95 }} className="bg-white rounded-[3.5rem] shadow-2xl p-10 space-y-8 relative border-8 border-sky-50 overflow-hidden">
             <div className="flex gap-8 items-start">
-              {scannedProduct.image ? (
-                <img src={scannedProduct.image} alt="Product" className="w-28 h-28 object-cover rounded-3xl shadow-lg border-4 border-white shrink-0" referrerPolicy="no-referrer" />
-              ) : (
-                <div className="w-28 h-28 bg-slate-50 rounded-3xl flex items-center justify-center text-slate-200 border-4 border-white shrink-0 shadow-inner"><Barcode className="w-14 h-14" /></div>
-              )}
+              <label className="relative w-28 h-28 cursor-pointer group shrink-0 select-none block active:scale-95 transition-all">
+                {scannedProduct.image ? (
+                  <img src={scannedProduct.image} alt="Product" className="w-28 h-28 object-cover rounded-3xl shadow-lg border-4 border-white" referrerPolicy="no-referrer" />
+                ) : (
+                  <div className="w-28 h-28 bg-slate-50 rounded-3xl flex flex-col items-center justify-center text-slate-350 border-4 border-white shadow-inner gap-1">
+                    {scannedProduct.barcode === 'MANUAL' ? (
+                      <Sparkles className="w-8 h-8 text-violet-400" />
+                    ) : (
+                      <Barcode className="w-8 h-8" />
+                    )}
+                    <span className="text-[9px] font-black uppercase text-slate-400">Add Photo</span>
+                  </div>
+                )}
+                <div className="absolute inset-0 bg-black/40 rounded-3xl opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white text-xs font-black uppercase gap-1">
+                  <Pencil className="w-4 h-4" />
+                  Change
+                </div>
+                <input 
+                  type="file" 
+                  accept="image/*" 
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      const reader = new FileReader();
+                      reader.onloadend = () => {
+                        const base64 = reader.result as string;
+                        setScannedProduct(prev => prev ? { ...prev, image: base64 } : null);
+                      };
+                      reader.readAsDataURL(file);
+                    }
+                  }}
+                  className="hidden" 
+                />
+              </label>
               <div className="flex-1 min-w-0">
                 <h3 className="text-3xl font-bold text-slate-800 leading-tight mb-2 truncate">{scannedProduct.name}</h3>
                 <p className="text-sm uppercase tracking-widest text-slate-400 font-bold mb-4">{scannedProduct.brand}</p>
                 <div className="flex flex-wrap gap-2">
-                  {scannedProduct.allergens?.map((alg, i) => <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[11px] font-black uppercase tracking-wider rounded-xl">{alg}</span>)}
+                  {scannedProduct.barcode === 'MANUAL' && (
+                    <span className="px-3 py-1.5 bg-violet-100 text-violet-700 text-[10px] font-black uppercase tracking-wider rounded-xl flex items-center gap-1">
+                      <Sparkles className="w-3 h-3 animate-pulse" />
+                      AI Organized
+                    </span>
+                  )}
+                  {scannedProduct.allergens?.map((alg, i) => (
+                    <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[10px] font-black uppercase tracking-wider rounded-xl">
+                      {alg}
+                    </span>
+                  ))}
                 </div>
               </div>
             </div>
-            <div className="p-8 bg-sky-50/50 rounded-[2.5rem] border-4 border-white shadow-inner">
-              <p className="text-sm font-medium text-slate-600 leading-relaxed line-clamp-4">{scannedProduct.ingredientsText}</p>
-            </div>
+            
+            {(!scannedProduct.ingredientsList || scannedProduct.ingredientsList.length === 0) ? (
+              <div className="bg-gradient-to-br from-violet-50 to-indigo-50/75 p-6 rounded-[2rem] border-2 border-indigo-100/50 text-center space-y-4">
+                <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+                  <Sparkles className="w-6 h-6 animate-pulse" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-slate-800">No ingredients list found</h4>
+                  <p className="text-xs text-slate-500 font-medium mt-1 leading-relaxed">
+                    Quick-Scan packaging back with AI to instantly translate, register & cross-check ingredients!
+                  </p>
+                </div>
+                <label className="inline-flex bg-indigo-600 hover:bg-indigo-700 text-white py-3 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-md items-center gap-2">
+                  {isVisionAnalyzingIngredients ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Analyzing package...
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-4 h-4" />
+                      Scan Back of Package
+                    </>
+                  )}
+                  <input 
+                    type="file" 
+                    accept="image/*" 
+                    capture="environment" 
+                    onChange={handleScanIngredientsForScannedProduct}
+                    className="hidden" 
+                    disabled={isVisionAnalyzingIngredients}
+                  />
+                </label>
+                {visionIngredientsError && (
+                  <p className="text-[10px] text-orange-500 font-bold">{visionIngredientsError}</p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="p-8 bg-sky-50/50 rounded-[2.5rem] border-4 border-white shadow-inner relative overflow-hidden">
+                  <div className="flex justify-between items-center mb-2">
+                    <p className="text-sm font-semibold text-slate-500 uppercase tracking-widest text-[9px]">Verdict Ingredients Text</p>
+                    <label className="text-[10px] font-black text-indigo-505 hover:text-indigo-600 cursor-pointer flex items-center gap-1 text-indigo-500">
+                      <Camera className="w-3.5 h-3.5" /> Re-scan Package Back
+                      <input 
+                        type="file" 
+                        accept="image/*" 
+                        capture="environment" 
+                        onChange={handleScanIngredientsForScannedProduct}
+                        className="hidden" 
+                        disabled={isVisionAnalyzingIngredients}
+                      />
+                    </label>
+                  </div>
+                  <p className="text-sm font-medium text-slate-600 leading-relaxed line-clamp-4">{scannedProduct.ingredientsText}</p>
+                  {isVisionAnalyzingIngredients && (
+                    <div className="absolute inset-0 bg-white/80 flex items-center justify-center gap-3">
+                      <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
+                      <span className="text-xs font-bold text-slate-700">Analyzing scan...</span>
+                    </div>
+                  )}
+                </div>
+                {visionIngredientsError && (
+                  <p className="text-[10px] text-orange-500 font-bold px-4">{visionIngredientsError}</p>
+                )}
+              </div>
+            )}
+
+            {scannedProduct.ingredientsList && scannedProduct.ingredientsList.length > 0 && (
+              <div className="space-y-3">
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-violet-500 animate-pulse" />
+                  Organized Ingredients ({scannedProduct.ingredientsList.length})
+                </h4>
+                <div className="bg-slate-50 rounded-[2rem] p-6 border-2 border-slate-150 flex flex-wrap gap-2 max-h-40 overflow-y-auto scrollbar-thin">
+                  {scannedProduct.ingredientsList.map((ing, i) => (
+                    <span key={i} className="px-3 py-1.5 bg-white text-slate-600 text-xs font-bold rounded-2xl border border-slate-200/50 shadow-sm hover:border-violet-300 transition-colors">
+                      {ing}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             
             <div className="space-y-4">
               <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest ml-4">How did it feel? (Optional notes)</label>
@@ -1617,10 +2109,10 @@ export default function App() {
 
     // Filter logic
     const filteredHistory = profileHistory.filter(item => {
-      const matchesSearch = searchQuery.trim() === '' || 
-        item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (item.brand && item.brand.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (item.notes && item.notes.toLowerCase().includes(searchQuery.toLowerCase()));
+      const nameMatch = item.name ? item.name.toLowerCase().includes(searchQuery.toLowerCase()) : false;
+      const brandMatch = item.brand ? item.brand.toLowerCase().includes(searchQuery.toLowerCase()) : false;
+      const notesMatch = item.notes ? item.notes.toLowerCase().includes(searchQuery.toLowerCase()) : false;
+      const matchesSearch = searchQuery.trim() === '' || nameMatch || brandMatch || notesMatch;
         
       if (filterType === 'with_notes') return matchesSearch && !!item.notes;
       if (filterType === 'scanned') return matchesSearch && item.barcode !== 'MANUAL';
@@ -1631,20 +2123,20 @@ export default function App() {
     // Sort logic
     const sortedHistory = [...filteredHistory].sort((a, b) => {
       if (sortBy === 'newest') {
-        const timeA = isNaN(Number(a.id)) ? new Date(a.date).getTime() : Number(a.id);
-        const timeB = isNaN(Number(b.id)) ? new Date(b.date).getTime() : Number(b.id);
+        const timeA = getTimestamp(a);
+        const timeB = getTimestamp(b);
         return timeB - timeA;
       }
       if (sortBy === 'oldest') {
-        const timeA = isNaN(Number(a.id)) ? new Date(a.date).getTime() : Number(a.id);
-        const timeB = isNaN(Number(b.id)) ? new Date(b.date).getTime() : Number(b.id);
+        const timeA = getTimestamp(a);
+        const timeB = getTimestamp(b);
         return timeA - timeB;
       }
       if (sortBy === 'az') {
-        return a.name.localeCompare(b.name);
+        return (a.name || "").localeCompare(b.name || "");
       }
       if (sortBy === 'za') {
-        return b.name.localeCompare(a.name);
+        return (b.name || "").localeCompare(a.name || "");
       }
       return 0;
     });
@@ -2234,13 +2726,36 @@ export default function App() {
                 
                 {/* Header Section */}
                 <div className="flex gap-6 items-start mb-8">
-                  <div className={`w-20 h-20 rounded-2xl flex items-center justify-center overflow-hidden border-4 border-white shadow-md ${selectedLogItem.reaction ? 'bg-orange-50' : 'bg-sky-50'} shrink-0`}>
+                  <label className={`w-20 h-20 rounded-2xl flex items-center justify-center overflow-hidden border-4 border-white shadow-md cursor-pointer group relative shrink-0 active:scale-95 transition-all ${selectedLogItem.reaction ? 'bg-orange-50' : 'bg-sky-50'}`}>
                     {selectedLogItem.image ? (
                       <img src={selectedLogItem.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                     ) : (
-                      <Barcode className="w-10 h-10 text-slate-300" />
+                      <div className="flex flex-col items-center justify-center gap-1">
+                        <Barcode className="w-6 h-6 text-slate-305 text-slate-300" />
+                        <span className="text-[8px] font-black uppercase text-slate-400">Add Foto</span>
+                      </div>
                     )}
-                  </div>
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white text-[9px] font-black uppercase gap-0.5">
+                      <Pencil className="w-3 h-3" />
+                      Edit
+                    </div>
+                    <input 
+                      type="file" 
+                      accept="image/*" 
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onloadend = () => {
+                            const base64 = reader.result as string;
+                            setHistory(history.map(h => h.id === selectedLogItem.id ? { ...h, image: base64 } : h));
+                          };
+                          reader.readAsDataURL(file);
+                        }
+                      }}
+                      className="hidden" 
+                    />
+                  </label>
                   <div className="flex-1 min-w-0">
                     <span className="text-[9px] font-black bg-slate-100 text-slate-500 px-3 py-1 rounded-full uppercase tracking-wider mb-2 inline-block">
                       {selectedLogItem.barcode === 'MANUAL' ? 'Manual Label' : `Barcode: ${selectedLogItem.barcode}`}
@@ -2302,74 +2817,136 @@ export default function App() {
                 </div>
 
                 {/* Ingredients & Allergens */}
-                {((selectedLogItem.ingredientsList && selectedLogItem.ingredientsList.length > 0) || (selectedLogItem.allergens && selectedLogItem.allergens.length > 0)) && (
-                  <div className="space-y-4 border-t border-dashed border-slate-100 pt-6 mb-8">
-                    {selectedLogItem.allergens && selectedLogItem.allergens.length > 0 && (
-                      <div className="space-y-2">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 animate-pulse">Flagged Allergens</span>
-                        <div className="flex flex-wrap gap-1.5">
-                          {selectedLogItem.allergens.map((alg, i) => (
-                            <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[10px] font-black uppercase tracking-wider rounded-xl">
-                              {alg}
-                            </span>
-                          ))}
-                        </div>
+                <div className="space-y-4 border-t border-dashed border-slate-100 pt-6 mb-8 text-left">
+                  {selectedLogItem.allergens && selectedLogItem.allergens.length > 0 && (
+                    <div className="space-y-2">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 animate-pulse">Flagged Allergens</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(selectedLogItem.allergens || []).map((alg, i) => (
+                          <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[10px] font-black uppercase tracking-wider rounded-xl">
+                            {alg}
+                          </span>
+                        ))}
                       </div>
-                    )}
+                    </div>
+                  )}
 
-                    {selectedLogItem.ingredientsList && selectedLogItem.ingredientsList.length > 0 && (
-                      <div className="space-y-3">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">
+                  {!selectedLogItem.ingredientsList || selectedLogItem.ingredientsList.length === 0 ? (
+                    <div className="bg-gradient-to-br from-violet-50 to-indigo-50/75 p-6 rounded-[2rem] border-2 border-indigo-100/50 text-center space-y-4 my-2 relative overflow-hidden">
+                      <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto shadow-inner">
+                        <Sparkles className="w-6 h-6 animate-pulse" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-slate-800">No ingredients registered yet</h4>
+                        <p className="text-xs text-slate-500 font-medium mt-1 leading-relaxed">
+                          Snap the back of the package ingredients list with AI to automatically retrieve and translate details!
+                        </p>
+                      </div>
+                      <label className="inline-flex bg-indigo-600 hover:bg-indigo-700 text-white py-3.5 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-md items-center gap-2">
+                        {isVisionAnalyzingIngredients ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            Analyzing packaging...
+                          </>
+                        ) : (
+                          <>
+                            <Camera className="w-4 h-4" />
+                            Scan Back of Package
+                          </>
+                        )}
+                        <input 
+                          type="file" 
+                          accept="image/*" 
+                          capture="environment" 
+                          onChange={(e) => handleScanIngredientsForLog(e, selectedLogItem.id)}
+                          className="hidden" 
+                          disabled={isVisionAnalyzingIngredients}
+                        />
+                      </label>
+                      {visionIngredientsError && (
+                        <p className="text-[10px] text-orange-500 font-bold mt-2">{visionIngredientsError}</p>
+                      )}
+                      {isVisionAnalyzingIngredients && (
+                        <div className="absolute inset-0 bg-white/85 flex items-center justify-center gap-3">
+                          <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
+                          <span className="text-xs font-bold text-slate-700">Extracting ingredients...</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3 relative overflow-hidden">
+                      <div className="flex justify-between items-center ml-1">
+                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
                           Cross-Checked Ingredients ({selectedLogItem.ingredientsList.length})
                         </span>
-                        
-                        {/* Table Layout */}
-                        <div className="border border-slate-150 rounded-2xl overflow-hidden bg-white shadow-sm max-h-[220px] overflow-y-auto scrollbar-thin">
-                          <table className="w-full text-left border-collapse text-xs">
-                            <thead>
-                              <tr className="bg-slate-50 border-b border-slate-150 text-[9px] font-black uppercase text-slate-400 tracking-wider">
-                                <th className="px-4 py-3">Ingredient</th>
-                                <th className="px-4 py-3 text-right">Family / Status</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100">
-                              {selectedLogItem.ingredientsList.map((ing, k) => {
-                                const allergen = isTypicalAllergen(ing);
-                                return (
-                                  <tr 
-                                    key={k} 
-                                    className={`transition-colors hover:bg-slate-50/50 ${allergen ? 'bg-orange-50/50 hover:bg-orange-50' : ''}`}
-                                  >
-                                    <td className="px-4 py-2.5 font-bold text-slate-700 capitalize leading-relaxed">
-                                      {allergen ? (
-                                        <span className="text-orange-700 font-extrabold flex items-center gap-1.5">
-                                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-orange-500" /> {ing}
-                                        </span>
-                                      ) : (
-                                        <span className="text-slate-600 font-medium">{ing}</span>
-                                      )}
-                                    </td>
-                                    <td className="px-4 py-2.5 text-right font-semibold">
-                                      {allergen ? (
-                                        <span className="inline-block bg-orange-100 text-orange-600 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg">
-                                          ⚠️ Allergen
-                                        </span>
-                                      ) : (
-                                        <span className="inline-block bg-slate-100 text-slate-405 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg text-slate-400">
-                                          Ok
-                                        </span>
-                                      )}
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
+                        <label className="text-[10px] font-black text-indigo-505 hover:text-indigo-600 cursor-pointer flex items-center gap-1 text-indigo-500">
+                          <Camera className="w-3.5 h-3.5" /> Re-scan
+                          <input 
+                            type="file" 
+                            accept="image/*" 
+                            capture="environment" 
+                            onChange={(e) => handleScanIngredientsForLog(e, selectedLogItem.id)}
+                            className="hidden" 
+                            disabled={isVisionAnalyzingIngredients}
+                          />
+                        </label>
                       </div>
-                    )}
-                  </div>
-                )}
+                      
+                      {/* Table Layout */}
+                      <div className="border border-slate-150 rounded-2xl overflow-hidden bg-white shadow-sm max-h-[220px] overflow-y-auto scrollbar-thin">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 border-b border-slate-150 text-[9px] font-black uppercase text-slate-400 tracking-wider">
+                              <th className="px-4 py-3">Ingredient</th>
+                              <th className="px-4 py-3 text-right">Family / Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {(selectedLogItem.ingredientsList || []).map((ing, k) => {
+                              const allergen = isTypicalAllergen(ing);
+                              return (
+                                <tr 
+                                  key={k} 
+                                  className={`transition-colors hover:bg-slate-50/50 ${allergen ? 'bg-orange-50/50 hover:bg-orange-50' : ''}`}
+                                >
+                                  <td className="px-4 py-2.5 font-bold text-slate-700 capitalize leading-relaxed">
+                                    {allergen ? (
+                                      <span className="text-orange-700 font-extrabold flex items-center gap-1.5">
+                                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-orange-500" /> {ing}
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-600 font-medium">{ing}</span>
+                                    )}
+                                  </td>
+                                  <td className="px-4 py-2.5 text-right font-semibold">
+                                    {allergen ? (
+                                      <span className="inline-block bg-orange-100 text-orange-600 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg">
+                                        ⚠️ Allergen
+                                      </span>
+                                    ) : (
+                                      <span className="inline-block bg-slate-100 text-slate-405 text-[9px] font-black uppercase tracking-wider px-2 py-1 rounded-lg text-slate-400 font-bold">
+                                        Ok
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      {isVisionAnalyzingIngredients && (
+                        <div className="absolute inset-0 bg-white/85 flex items-center justify-center gap-3 z-10 rounded-2xl">
+                          <Loader2 className="w-6 h-6 animate-spin text-indigo-600" />
+                          <span className="text-xs font-bold text-slate-700">Updating log details...</span>
+                        </div>
+                      )}
+                      {visionIngredientsError && (
+                        <p className="text-[10px] text-orange-500 font-bold ml-1 mt-2">{visionIngredientsError}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
 
                 {/* Footer Buttons: Delete / Close */}
                 <div className="flex gap-4 border-t border-slate-50 pt-6">
