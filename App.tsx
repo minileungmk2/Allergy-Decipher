@@ -1,10 +1,12 @@
-import {StrictMode} from 'react';
-import {createRoot} from 'react-dom/client';
-import App from './App.tsx';
-import './index.css';
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+export default function handler(
+  request: VercelRequest,
+  response: VercelResponse,
+) {
+  response.status(200).json({
+    message: "pong",
+    time: new Date().toISOString(),
+    vercel: !!process.env.VERCEL
+  });
+}
