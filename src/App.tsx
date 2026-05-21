@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   ShieldCheck, 
   Barcode, 
@@ -30,7 +30,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import appLogo from './assets/images/AllerScan Logo.jpeg';
+import appLogo from './assets/images/AllerScan_Logo.jpeg';
 
 // --- Transparent Image Helper Component to remove White Background dynamically ---
 const TransparentImage = React.forwardRef<HTMLImageElement, React.ImgHTMLAttributes<HTMLImageElement>>(({ src, alt, className, ...props }, ref) => {
@@ -249,6 +249,7 @@ const COMMON_FILLERS = [
 ];
 
 const normalizeIngredientName = (name: string): string => {
+  if (!name || typeof name !== 'string') return '';
   let cleaned = name.toLowerCase().trim();
   
   // Strip common packaging / status prefixes
@@ -286,8 +287,38 @@ const normalizeIngredientName = (name: string): string => {
 };
 
 const isTypicalAllergen = (ingredient: string): boolean => {
+  if (!ingredient || typeof ingredient !== 'string') return false;
   const norm = ingredient.toLowerCase().trim();
   return TYPICAL_ALLERGENS.some(allergen => norm.includes(allergen) || allergen.includes(norm));
+};
+
+const getTimestamp = (item: ProductLog): number => {
+  if (!item) return 0;
+  const numId = Number(item.id);
+  if (!isNaN(numId)) return numId;
+  if (item.date) {
+    const parts = item.date.split('-');
+    if (parts.length === 3) {
+      const d = new Date(item.date);
+      if (!isNaN(d.getTime())) return d.getTime();
+    }
+    const slashParts = item.date.split('/');
+    if (slashParts.length === 3) {
+      const p0 = parseInt(slashParts[0], 10);
+      if (p0 > 12) {
+        // DD/MM/YYYY
+        const d = new Date(`${slashParts[1]}/${slashParts[0]}/${slashParts[2]}`);
+        if (!isNaN(d.getTime())) return d.getTime();
+      } else {
+        // MM/DD/YYYY
+        const d = new Date(`${slashParts[0]}/${slashParts[1]}/${slashParts[2]}`);
+        if (!isNaN(d.getTime())) return d.getTime();
+      }
+    }
+    const parsed = new Date(item.date).getTime();
+    if (!isNaN(parsed)) return parsed;
+  }
+  return 0;
 };
 
 const DEFAULT_HISTORY_SEED: ProductLog[] = [
@@ -419,6 +450,11 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [scanner, setScanner] = useState<Html5Qrcode | null>(null);
   const [scannedProduct, setScannedProduct] = useState<Partial<ProductLog> | null>(null);
+  const [scannerMode, setScannerMode] = useState<'capture' | 'auto'>('capture');
+  const [isCapturing, setIsCapturing] = useState<boolean>(false);
+  const [shutterActive, setShutterActive] = useState<boolean>(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoStreamRef = useRef<MediaStream | null>(null);
   const [showAbout, setShowAbout] = useState(false);
   const [showManualAdd, setShowManualAdd] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
@@ -648,7 +684,133 @@ export default function App() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
 
+  const stopVideoStream = () => {
+    if (videoStreamRef.current) {
+      videoStreamRef.current.getTracks().forEach(track => {
+        try {
+          track.stop();
+        } catch (e) {
+          console.error("Failed to stop track:", e);
+        }
+      });
+      videoStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setScanning(false);
+  };
+
+  const bindVideoRef = useCallback((node: HTMLVideoElement | null) => {
+    (videoRef as any).current = node;
+
+    if (node && videoStreamRef.current) {
+      console.log("Video element mounted, assigning stream:", videoStreamRef.current.id);
+      try {
+        node.srcObject = videoStreamRef.current;
+        node.muted = true;
+        // Set playsInline as attribute directly or as property
+        node.setAttribute('playsinline', 'true');
+        node.playsInline = true;
+        node.play().then(() => {
+          console.log("Video play stream successful under callback ref.");
+        }).catch(e => {
+          console.warn("Video element failed auto-play on callback ref, trying to trigger directly:", e);
+          // Try manual playback
+          node.muted = true;
+          node.play().catch(pErr => console.warn("Retry playback failed:", pErr));
+        });
+      } catch (err) {
+        console.error("Failed to assign stream to video element:", err);
+      }
+    }
+  }, []);
+
+  const startVideoStream = async () => {
+    stopVideoStream();
+    setCameraError(null);
+    setScannedProduct(null);
+
+    // Sequence of fallback constraints to maximize hardware compatibility
+    const constraintOptions = [
+      {
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      },
+      {
+        video: {
+          facingMode: "environment"
+        },
+        audio: false
+      },
+      {
+        video: true,
+        audio: false
+      }
+    ];
+
+    let stream: MediaStream | null = null;
+    let fallbackError: any = null;
+
+    for (const constraints of constraintOptions) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (stream) {
+          console.log("Successfully acquired camera stream with constraints:", constraints);
+          break;
+        }
+      } catch (err) {
+        console.warn("Camera constraint attempt failed:", constraints, err);
+        fallbackError = err;
+      }
+    }
+
+    if (!stream) {
+      console.error("All media track acquisition attempts failed:", fallbackError);
+      let msg = "Failed to access camera.";
+      if (fallbackError?.name === "NotAllowedError" || fallbackError?.message?.includes("Permission")) {
+        msg = "Camera permission denied. Please allow camera access in your browser settings.";
+      } else if (fallbackError?.name === "NotFoundError" || fallbackError?.message?.includes("NotFound")) {
+        msg = "No suitable camera found on this device.";
+      } else if (fallbackError?.message) {
+        msg = fallbackError.message;
+      }
+      setCameraError(msg);
+      setScanning(false);
+      return;
+    }
+
+    try {
+      videoStreamRef.current = stream;
+      setScanning(true);
+
+      // Explicitly set stream on ref if video is already rendered
+      if (videoRef.current) {
+        console.log("Video ref already available, assigning stream immediately.");
+        videoRef.current.srcObject = stream;
+        videoRef.current.muted = true;
+        videoRef.current.playsInline = true;
+        videoRef.current.play().catch(e => console.warn("videoRef playback failed:", e));
+      }
+    } catch (err: any) {
+      console.error("Failed to associate video stream elements:", err);
+      setCameraError(err.message || "Association with camera display failed.");
+      setScanning(false);
+    }
+  };
+
   const startScanner = async (retryCount = 0) => {
+    if (scannerMode === 'capture') {
+      await startVideoStream();
+      return;
+    }
+
+    // Auto scan mode implementation
+    stopVideoStream();
     if (scanner) return;
     setCameraError(null);
     
@@ -741,7 +903,162 @@ export default function App() {
         scanner.clear();
       }).catch(() => {});
       setScanner(null);
-      setScanning(false);
+    }
+    setScanning(false);
+  };
+
+  const scanFileBarcode = async (file: File): Promise<string> => {
+    // Generate a guaranteed unique element ID to avoid html5-qrcode instance collisions
+    const randId = `file-scanner-${Math.random().toString(36).substring(2, 11)}`;
+    const container = document.createElement('div');
+    container.id = randId;
+    container.style.display = 'none';
+    document.body.appendChild(container);
+
+    const tempScanner = new Html5Qrcode(randId, {
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.UPC_A,
+        Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.EAN_13,
+        Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.CODE_39,
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.ITF
+      ],
+      verbose: false
+    });
+
+    try {
+      const decodedText = await tempScanner.scanFile(file, false);
+      try {
+        await tempScanner.clear();
+      } catch (_) {}
+      container.remove();
+      return decodedText;
+    } catch (err) {
+      try {
+        await tempScanner.clear();
+      } catch (_) {}
+      container.remove();
+      throw err;
+    }
+  };
+
+  const captureAndScan = async () => {
+    if (!videoRef.current || isCapturing) return;
+    setIsCapturing(true);
+    setScanError(null);
+
+    // Trigger visual capture flash
+    setShutterActive(true);
+    setTimeout(() => setShutterActive(false), 200);
+
+    try {
+      const video = videoRef.current;
+      const canvas = document.createElement('canvas');
+      
+      // Capture at camera stream's natural native resolutions for crystal clarity
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
+      
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        throw new Error("Could not acquire 2D drawing context.");
+      }
+      
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const tryScanBlob = (blob: Blob) => {
+        const file = new File([blob], "temp-scan.png", { type: "image/png" });
+        return scanFileBarcode(file);
+      };
+
+      const getBlobFromCanvas = (c: HTMLCanvasElement): Promise<Blob> => {
+        return new Promise((resolve, reject) => {
+          c.toBlob((b) => {
+            if (b) resolve(b);
+            else reject(new Error("Blob drawing empty"));
+          }, "image/png");
+        });
+      };
+
+      // Create cropped 1 (horizontal center strip - 80% width, 30% height of canvas)
+      const cropX1 = Math.floor(canvas.width * 0.1);
+      const cropY1 = Math.floor(canvas.height * 0.35);
+      const cropW1 = Math.floor(canvas.width * 0.8);
+      const cropH1 = Math.floor(canvas.height * 0.3);
+
+      const canvasBand = document.createElement('canvas');
+      canvasBand.width = cropW1;
+      canvasBand.height = cropH1;
+      const ctxBand = canvasBand.getContext('2d');
+      if (ctxBand) {
+        ctxBand.drawImage(canvas, cropX1, cropY1, cropW1, cropH1, 0, 0, cropW1, cropH1);
+      }
+
+      // Create cropped 2 (square center - 50% width and 50% height)
+      const cropW2 = Math.floor(canvas.width * 0.5);
+      const cropH2 = Math.floor(canvas.height * 0.5);
+      const cropX2 = Math.floor((canvas.width - cropW2) / 2);
+      const cropY2 = Math.floor((canvas.height - cropH2) / 2);
+
+      const canvasSquare = document.createElement('canvas');
+      canvasSquare.width = cropW2;
+      canvasSquare.height = cropH2;
+      const ctxSquare = canvasSquare.getContext('2d');
+      if (ctxSquare) {
+        ctxSquare.drawImage(canvas, cropX2, cropY2, cropW2, cropH2, 0, 0, cropW2, cropH2);
+      }
+
+      // Step 1: Try Horizontal Band Crop (Fantastic for long, thin 1D barcodes)
+      try {
+        console.log("Strategy 1: Trying center strip crop...");
+        const bandBlob = await getBlobFromCanvas(canvasBand);
+        const codeText = await tryScanBlob(bandBlob);
+        console.log("Success with Strategy 1 (strip):", codeText);
+        stopVideoStream();
+        setIsCapturing(false);
+        await fetchProduct(codeText);
+        return;
+      } catch (err) {
+        console.warn("Strategy 1 failed:", err);
+      }
+
+      // Step 2: Try Square Crop (Great for 2D/QR codes or centered codes)
+      try {
+        console.log("Strategy 2: Trying center square crop...");
+        const squareBlob = await getBlobFromCanvas(canvasSquare);
+        const codeText = await tryScanBlob(squareBlob);
+        console.log("Success with Strategy 2 (square):", codeText);
+        stopVideoStream();
+        setIsCapturing(false);
+        await fetchProduct(codeText);
+        return;
+      } catch (err) {
+        console.warn("Strategy 2 failed:", err);
+      }
+
+      // Step 3: Try Full Canvas Frame (Classic fallback)
+      try {
+        console.log("Strategy 3: Trying full canvas frame fallback...");
+        const fullBlob = await getBlobFromCanvas(canvas);
+        const codeText = await tryScanBlob(fullBlob);
+        console.log("Success with Strategy 3 (full frame):", codeText);
+        stopVideoStream();
+        setIsCapturing(false);
+        await fetchProduct(codeText);
+        return;
+      } catch (err) {
+        console.error("Strategy 3 failed:", err);
+        setScanError("No barcode detected. Ensure the code is flat, well-lit, aligned inside the viewfinder guidelines, and try scanning again. Or use manual search below!");
+        setIsCapturing(false);
+      }
+
+    } catch (err: any) {
+      console.error("Canvas snapshot error:", err);
+      setScanError("Failed to freeze camera frame. Please try again.");
+      setIsCapturing(false);
     }
   };
 
@@ -792,10 +1109,16 @@ export default function App() {
     const newLog: ProductLog = {
       id: Date.now().toString(),
       profileId: activeProfile.id,
-      date: new Date().toLocaleDateString(),
+      date: new Date().toISOString().split('T')[0],
       reaction,
-      notes: scanNotes,
-      ...(scannedProduct as ProductLog)
+      notes: scanNotes || "",
+      name: scannedProduct.name || "Unknown Product",
+      brand: scannedProduct.brand || "Unknown Brand",
+      barcode: scannedProduct.barcode || "UNKNOWN",
+      ingredientsText: scannedProduct.ingredientsText || "Ingredients not listed.",
+      ingredientsList: scannedProduct.ingredientsList || [],
+      allergens: scannedProduct.allergens || [],
+      image: scannedProduct.image || ""
     };
 
     setHistory([newLog, ...history]);
@@ -815,7 +1138,7 @@ export default function App() {
     const newLog: ProductLog = {
       id: Date.now().toString(),
       profileId: activeProfile.id,
-      date: new Date().toLocaleDateString(),
+      date: new Date().toISOString().split('T')[0],
       reaction: manualReaction,
       name: manualName,
       brand: "Manual Entry",
@@ -976,11 +1299,23 @@ export default function App() {
 
   useEffect(() => {
     if (activeTab === 'scan') {
-      startScanner();
+      if (scannerMode === 'capture') {
+        stopScanner();
+        startVideoStream();
+      } else {
+        stopVideoStream();
+        startScanner();
+      }
     } else {
       stopScanner();
+      stopVideoStream();
     }
-  }, [activeTab]);
+    // Clean up on component unmount
+    return () => {
+      stopScanner();
+      stopVideoStream();
+    };
+  }, [activeTab, scannerMode]);
 
   // Trigger analysis automatically on tab change, profile change, or history updates to keep insights fully in sync
   useEffect(() => {
@@ -1177,36 +1512,88 @@ export default function App() {
 
   const ScannerView = () => (
     <div className="space-y-8">
+      {/* Premium Segmented Scanner Mode Toggle */}
+      <div className="bg-slate-150 p-1.5 rounded-[2.2rem] flex max-w-md mx-auto shadow-inner border border-slate-200/40 relative">
+        <button
+          onClick={() => setScannerMode('capture')}
+          type="button"
+          className={`flex-1 flex items-center justify-center gap-2 py-3 px-6 rounded-[1.7rem] text-xs font-black uppercase tracking-wider transition-all duration-300 ${
+            scannerMode === 'capture'
+              ? 'bg-white text-sky-600 shadow-lg shadow-slate-200/80 scale-[1.02]'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          <Camera className="w-4 h-4" />
+          Tap to Capture (Reliable)
+        </button>
+        <button
+          onClick={() => setScannerMode('auto')}
+          type="button"
+          className={`flex-1 flex items-center justify-center gap-2 py-3 px-6 rounded-[1.7rem] text-xs font-black uppercase tracking-wider transition-all duration-300 ${
+            scannerMode === 'auto'
+              ? 'bg-white text-sky-600 shadow-lg shadow-slate-200/80 scale-[1.02]'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          <div className="w-2 h-2 bg-orange-400 rounded-full animate-pulse" />
+          Auto-Scan (Beta)
+        </button>
+      </div>
+
       <div className="bg-white rounded-[3.5rem] shadow-2xl overflow-hidden border-8 border-white relative">
         <div className="p-6 bg-yellow-50 border-b border-yellow-100 flex justify-between items-center">
           <div className="flex items-center gap-3">
-            <div className="w-4 h-4 bg-orange-400 rounded-full animate-pulse shadow-lg shadow-orange-200"></div>
-            <h3 className="text-sm font-bold text-orange-600 uppercase tracking-widest">Magic Eye Active</h3>
+            <div className={`w-4 h-4 rounded-full animate-pulse shadow-lg ${scannerMode === 'capture' ? 'bg-sky-400 shadow-sky-200' : 'bg-orange-400 shadow-orange-200'}`}></div>
+            <h3 className="text-sm font-bold text-slate-700 uppercase tracking-widest">
+              {scannerMode === 'capture' ? 'Snapshot Assistant' : 'Magic Eye Active'}
+            </h3>
           </div>
-          <p className="text-xs font-bold text-yellow-600/50 uppercase tracking-widest">Point & Find</p>
+          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">
+            {scannerMode === 'capture' ? 'Tap To Snap' : 'Point & Find'}
+          </p>
         </div>
         
-        <div className="relative aspect-square sm:aspect-video bg-slate-100 flex items-center justify-center overflow-hidden">
+        <div className="relative aspect-square sm:aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
+          {/* Shutter flash screen overlay */}
+          {shutterActive && (
+            <div className="absolute inset-0 bg-white z-50 pointer-events-none transition-opacity duration-150 opacity-100" />
+          )}
+
+          {/* Guidelines Reticle */}
           <div className="absolute inset-0 pointer-events-none z-10">
-             <div className="absolute top-10 left-10 w-20 h-20 border-t-8 border-l-8 border-white/80 rounded-tl-[3rem]"></div>
-             <div className="absolute top-10 right-10 w-20 h-20 border-t-8 border-r-8 border-white/80 rounded-tr-[3rem]"></div>
-             <div className="absolute bottom-10 left-10 w-20 h-20 border-b-8 border-l-8 border-white/80 rounded-bl-[3rem]"></div>
-             <div className="absolute bottom-10 right-10 w-20 h-20 border-b-8 border-r-8 border-white/80 rounded-br-[3rem]"></div>
-             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 border-4 border-white/20 rounded-full"></div>
+             <div className={`absolute top-10 left-10 w-20 h-20 border-t-8 border-l-8 rounded-tl-[3rem] transition-colors duration-500 ${scannerMode === 'capture' ? 'border-sky-400' : 'border-orange-400'}`}></div>
+             <div className={`absolute top-10 right-10 w-20 h-20 border-t-8 border-r-8 rounded-tr-[3rem] transition-colors duration-500 ${scannerMode === 'capture' ? 'border-sky-400' : 'border-orange-400'}`}></div>
+             <div className={`absolute bottom-10 left-10 w-20 h-20 border-b-8 border-l-8 rounded-bl-[3rem] transition-colors duration-500 ${scannerMode === 'capture' ? 'border-sky-400' : 'border-orange-400'}`}></div>
+             <div className={`absolute bottom-10 right-10 w-20 h-20 border-b-8 border-r-8 rounded-br-[3rem] transition-colors duration-500 ${scannerMode === 'capture' ? 'border-sky-400' : 'border-orange-400'}`}></div>
+             <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 border-4 rounded-full animate-ping ${scannerMode === 'capture' ? 'border-sky-400/30' : 'border-orange-400/30'}`}></div>
           </div>
           
-          <div id="reader" ref={scannerRef} className="w-full h-full"></div>
+          {scannerMode === 'capture' ? (
+            <video 
+              ref={bindVideoRef}
+              playsInline
+              autoPlay
+              muted
+              className="absolute inset-0 w-full h-full object-cover z-0"
+              style={{ display: 'block' }}
+            />
+          ) : (
+            <div id="reader" ref={scannerRef} className="absolute inset-0 w-full h-full z-0"></div>
+          )}
           
           {cameraError && (
              <div className="absolute inset-0 bg-white/95 flex flex-col items-center justify-center p-8 z-30 backdrop-blur-lg">
                <div className="w-20 h-20 bg-orange-50 text-orange-500 rounded-[2rem] flex items-center justify-center mb-6">
                  <AlertTriangle className="w-10 h-10" />
                </div>
-               <h3 className="text-xl font-bold text-slate-800 mb-2">Camera Ouchie</h3>
+               <h3 className="text-xl font-bold text-slate-800 mb-2">Camera Access Ouchie</h3>
                <p className="text-sm text-slate-400 font-bold mb-8 text-center">{cameraError}</p>
                <button 
-                 onClick={() => startScanner()}
-                 className="bg-sky-500 text-white font-bold px-10 py-4 rounded-3xl shadow-xl bouncy"
+                 onClick={() => {
+                   if (scannerMode === 'capture') startVideoStream();
+                   else startScanner();
+                 }}
+                 className="bg-sky-500 text-white font-bold px-10 py-4 rounded-3xl shadow-xl bouncy animate-bounce"
                >
                  Try Again
                </button>
@@ -1219,37 +1606,74 @@ export default function App() {
               <p className="text-xl font-bold text-slate-800">Finding yummy details...</p>
             </div>
           )}
+
           {!scanning && !loading && !scannedProduct && !cameraError && (
             <div className="absolute inset-0 bg-white/50 backdrop-blur-sm flex flex-col items-center justify-center gap-6 z-20">
               <div className="w-20 h-20 bg-sky-50 text-sky-500 rounded-[2rem] flex items-center justify-center shadow-inner">
                 <Camera className="w-10 h-10" />
               </div>
               <button 
-                onClick={() => startScanner()}
-                className="bg-sky-500 text-white font-bold px-10 py-5 rounded-[2rem] shadow-2xl bouncy flex items-center gap-3"
+                onClick={() => {
+                  if (scannerMode === 'capture') startVideoStream();
+                  else startScanner();
+                }}
+                className="bg-sky-500 text-white font-bold px-10 py-5 rounded-[2rem] shadow-2xl bouncy flex items-center gap-3 animate-pulse"
               >
                 <div className="w-2 h-2 bg-white rounded-full animate-ping" />
-                Open Magic Eye
+                Open Camera Feed
               </button>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center px-10">Sometimes the Eye needs a gentle poke to wake up</p>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center px-10">Hold the frame steady when capturing</p>
             </div>
           )}
+
           {!scanning && !loading && !scannedProduct && !cameraError && (
             <div className="text-slate-300 text-center p-12 absolute z-0 pointer-events-none">
               <Camera className="w-20 h-20 mx-auto mb-8 opacity-10" />
-              <p className="text-lg font-bold">Wake up the Magic Eye!</p>
+              <p className="text-lg font-bold">Wake up the Camera Feed!</p>
             </div>
           )}
         </div>
 
         {!loading && !scannedProduct && (
           <div className="p-10 space-y-8 bg-white">
-            <p className="text-sm text-center text-slate-400 font-bold uppercase tracking-widest">Show the code to the Eye</p>
+            
+            {/* Capture button overlay for manual mode */}
+            {scannerMode === 'capture' && scanning && (
+              <div className="flex flex-col items-center justify-center pb-8 border-b border-slate-100 gap-3">
+                <button
+                  onClick={captureAndScan}
+                  disabled={isCapturing}
+                  type="button"
+                  className="w-full bg-gradient-to-r from-sky-500 to-indigo-505 bg-sky-500 hover:bg-sky-600 text-white font-black px-10 py-5 rounded-[2rem] shadow-xl hover:shadow-2xl disabled:bg-slate-300 active:scale-[0.98] transition-all flex items-center justify-center gap-3 bouncy"
+                >
+                  {isCapturing ? (
+                    <>
+                      <Loader2 className="w-6 h-6 animate-spin" />
+                      Freezing & Scanning Barcode...
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-6 h-6" />
+                      CAPTURE & SCAN BARCODE
+                    </>
+                  )}
+                </button>
+                <p className="text-xs font-black text-sky-500 uppercase tracking-widest text-center">
+                  Align barcode horizontally & stay steady before tapping!
+                </p>
+              </div>
+            )}
+
+            <p className="text-xs text-center text-slate-400 font-bold uppercase tracking-widest">
+              {scannerMode === 'capture' 
+                ? "Align the barcode inside the target box and click Capture" 
+                : "Show the code to the Eye"}
+            </p>
             
             {scanError && (
               <div className="p-5 bg-orange-50 border border-orange-100 rounded-3xl flex items-start gap-4 relative animate-in fade-in slide-in-from-top-2">
                 <div className="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center shrink-0">
-                  <AlertTriangle className="w-4 h-4 text-orange-655 text-orange-500" />
+                  <AlertTriangle className="w-4 h-4 text-orange-500" />
                 </div>
                 <div className="flex-1 pr-6">
                   <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide mb-0.5">Scanner Notice</h4>
@@ -1257,7 +1681,7 @@ export default function App() {
                 </div>
                 <button 
                   onClick={() => setScanError(null)} 
-                  className="absolute top-4 right-4 text-slate-400 hover:text-slate-650 transition-colors p-1 hover:bg-orange-100/50 rounded-lg"
+                  className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition-colors p-1 hover:bg-orange-100/50 rounded-lg"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -1295,7 +1719,7 @@ export default function App() {
               </button>
             </form>
             <button 
-              onClick={() => { setShowManualAdd(true); stopScanner(); }} 
+              onClick={() => { setShowManualAdd(true); stopScanner(); stopVideoStream(); }} 
               className="w-full py-6 text-sm font-bold text-sky-500 hover:text-sky-600 bg-sky-50/50 rounded-[2rem] border-4 border-dashed border-sky-100 transition-all uppercase"
             >
               Manual Secret Entry
@@ -1352,10 +1776,10 @@ export default function App() {
 
     // Filter logic
     const filteredHistory = profileHistory.filter(item => {
-      const matchesSearch = searchQuery.trim() === '' || 
-        item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (item.brand && item.brand.toLowerCase().includes(searchQuery.toLowerCase())) ||
-        (item.notes && item.notes.toLowerCase().includes(searchQuery.toLowerCase()));
+      const nameMatch = item.name ? item.name.toLowerCase().includes(searchQuery.toLowerCase()) : false;
+      const brandMatch = item.brand ? item.brand.toLowerCase().includes(searchQuery.toLowerCase()) : false;
+      const notesMatch = item.notes ? item.notes.toLowerCase().includes(searchQuery.toLowerCase()) : false;
+      const matchesSearch = searchQuery.trim() === '' || nameMatch || brandMatch || notesMatch;
         
       if (filterType === 'with_notes') return matchesSearch && !!item.notes;
       if (filterType === 'scanned') return matchesSearch && item.barcode !== 'MANUAL';
@@ -1366,20 +1790,20 @@ export default function App() {
     // Sort logic
     const sortedHistory = [...filteredHistory].sort((a, b) => {
       if (sortBy === 'newest') {
-        const timeA = isNaN(Number(a.id)) ? new Date(a.date).getTime() : Number(a.id);
-        const timeB = isNaN(Number(b.id)) ? new Date(b.date).getTime() : Number(b.id);
+        const timeA = getTimestamp(a);
+        const timeB = getTimestamp(b);
         return timeB - timeA;
       }
       if (sortBy === 'oldest') {
-        const timeA = isNaN(Number(a.id)) ? new Date(a.date).getTime() : Number(a.id);
-        const timeB = isNaN(Number(b.id)) ? new Date(b.date).getTime() : Number(b.id);
+        const timeA = getTimestamp(a);
+        const timeB = getTimestamp(b);
         return timeA - timeB;
       }
       if (sortBy === 'az') {
-        return a.name.localeCompare(b.name);
+        return (a.name || "").localeCompare(b.name || "");
       }
       if (sortBy === 'za') {
-        return b.name.localeCompare(a.name);
+        return (b.name || "").localeCompare(a.name || "");
       }
       return 0;
     });
@@ -1772,6 +2196,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FFF9F5] font-sans selection:bg-orange-100 text-slate-800 overflow-x-hidden">
+      {/* Invisible container for static capture snapshot scanning */}
+      <div id="hidden-reader" className="hidden" style={{ display: 'none' }}></div>
+
       <Header 
         onShowAbout={() => setShowAbout(true)} 
         onLogout={handleLogout} 
@@ -2034,13 +2461,13 @@ export default function App() {
                 </div>
 
                 {/* Ingredients & Allergens */}
-                {((selectedLogItem.ingredientsList && selectedLogItem.ingredientsList.length > 0) || (selectedLogItem.allergens && selectedLogItem.allergens.length > 0)) && (
+                {(((selectedLogItem.ingredientsList && selectedLogItem.ingredientsList.length > 0) || (selectedLogItem.allergens && selectedLogItem.allergens.length > 0))) && (
                   <div className="space-y-4 border-t border-dashed border-slate-100 pt-6 mb-8">
                     {selectedLogItem.allergens && selectedLogItem.allergens.length > 0 && (
                       <div className="space-y-2">
                         <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 animate-pulse">Flagged Allergens</span>
                         <div className="flex flex-wrap gap-1.5">
-                          {selectedLogItem.allergens.map((alg, i) => (
+                          {(selectedLogItem.allergens || []).map((alg, i) => (
                             <span key={i} className="px-3 py-1.5 bg-orange-100 text-orange-600 text-[10px] font-black uppercase tracking-wider rounded-xl">
                               {alg}
                             </span>
@@ -2065,7 +2492,7 @@ export default function App() {
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100">
-                              {selectedLogItem.ingredientsList.map((ing, k) => {
+                              {(selectedLogItem.ingredientsList || []).map((ing, k) => {
                                 const allergen = isTypicalAllergen(ing);
                                 return (
                                   <tr 
