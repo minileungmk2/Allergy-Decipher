@@ -451,6 +451,10 @@ export default function App() {
   const [scanner, setScanner] = useState<Html5Qrcode | null>(null);
   const [scannedProduct, setScannedProduct] = useState<Partial<ProductLog> | null>(null);
   const [scannerMode, setScannerMode] = useState<'capture' | 'auto'>('capture');
+  const [scanMethod, setScanMethod] = useState<'mobile' | 'live'>(() => {
+    const isMobile = typeof window !== "undefined" && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+    return isMobile ? 'mobile' : 'live';
+  });
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [shutterActive, setShutterActive] = useState<boolean>(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -1156,14 +1160,55 @@ export default function App() {
     const file = e.target.files?.[0];
     if (file) {
       setLoading(true);
+      setScanError(null);
+      
       const reader = new FileReader();
       reader.onloadend = async () => {
+        const base64 = reader.result as string;
         try {
-          const base64 = reader.result as string;
-          await analyzeWithAIVision(base64);
-        } catch (err) {
-          setScanError("Could not process uploaded/photographed file.");
-          setLoading(false);
+          console.log("Parsing barcode client-side with native scanner engine...");
+          const barcodeData = await scanFileBarcode(file);
+          console.log("Found direct barcode match:", barcodeData);
+          await fetchProduct(barcodeData);
+        } catch (clientErr) {
+          console.log("Traditional scanning failed, resolving using high-fidelity barcode visual parsing...");
+          try {
+            const res = await fetch("/api/gemini/analyze-photo", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ image: base64 })
+            });
+
+            if (!res.ok) {
+              throw new Error(`Parse failed with status ${res.status}`);
+            }
+
+            const data = await res.json();
+            if (data.success && data.detectedBarcode) {
+              console.log("Barcode extracted correctly:", data.detectedBarcode);
+              await fetchProduct(data.detectedBarcode);
+            } else if (data.success && data.productDetails) {
+              stopVideoStream();
+              setScannedProduct({
+                barcode: data.detectedBarcode || "MANUAL",
+                name: data.productDetails.name || "Custom Item",
+                brand: data.productDetails.brand || "Custom Scanner",
+                ingredientsText: data.productDetails.ingredientsText || "Ingredients not listed.",
+                ingredientsList: data.productDetails.ingredientsList || [],
+                allergens: data.productDetails.allergens || [],
+                image: ""
+              });
+            } else {
+              setScanError("No barcode found in photo. Ensure the code is clear, highly illuminated, and try scanning again. Or enter manually!");
+            }
+          } catch (apiErr: any) {
+            console.error("Advanced OCR extract issue:", apiErr);
+            setScanError("No barcode detected in image. Please try a closer, well-lit photo of the barcode lines.");
+          } finally {
+            setLoading(false);
+          }
         }
       };
       reader.readAsDataURL(file);
@@ -1508,7 +1553,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (activeTab === 'scan') {
+    if (activeTab === 'scan' && scanMethod === 'live') {
       if (scannerMode === 'capture') {
         stopScanner();
         startVideoStream();
@@ -1525,7 +1570,7 @@ export default function App() {
       stopScanner();
       stopVideoStream();
     };
-  }, [activeTab, scannerMode]);
+  }, [activeTab, scannerMode, scanMethod]);
 
   // Trigger analysis automatically on tab change, profile change, or history updates to keep insights fully in sync
   useEffect(() => {
@@ -1723,16 +1768,13 @@ export default function App() {
   const ScannerView = () => (
     <div className="space-y-8 animate-in fade-in duration-300">
       <div className="bg-white rounded-[3.5rem] shadow-2xl overflow-hidden border-8 border-white relative">
-        <div className="p-6 bg-yellow-50 border-b border-yellow-100 flex justify-between items-center">
+        <div className="p-6 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
           <div className="flex items-center gap-3">
-            <Sparkles className="w-5 h-5 text-violet-500 animate-pulse" />
-            <h3 className="text-sm font-bold text-slate-700 uppercase tracking-widest">
-              AI Vision Packaging Reader
-            </h3>
+            <Camera className="w-5 h-5 text-indigo-600" />
+            <span className="text-xs font-black uppercase tracking-widest text-slate-550 text-slate-500">
+              Product Barcode Scanner
+            </span>
           </div>
-          <p className="text-[10px] font-black text-violet-600 uppercase tracking-widest bg-violet-100/50 px-3 py-1.5 rounded-xl border border-violet-200">
-            Auto-Translates to English
-          </p>
         </div>
         
         <div className="relative aspect-square sm:aspect-video bg-slate-950 flex items-center justify-center overflow-hidden">
@@ -1743,11 +1785,11 @@ export default function App() {
 
           {/* Guidelines Reticle */}
           <div className="absolute inset-0 pointer-events-none z-10">
-             <div className="absolute top-10 left-10 w-20 h-20 border-t-8 border-l-8 rounded-tl-[3rem] border-violet-500/85"></div>
-             <div className="absolute top-10 right-10 w-20 h-20 border-t-8 border-r-8 rounded-tr-[3rem] border-violet-500/85"></div>
-             <div className="absolute bottom-10 left-10 w-20 h-20 border-b-8 border-l-8 rounded-bl-[3rem] border-violet-500/85"></div>
-             <div className="absolute bottom-10 right-10 w-20 h-20 border-b-8 border-r-8 rounded-br-[3rem] border-violet-500/85"></div>
-             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 border-4 rounded-full animate-ping border-violet-500/20"></div>
+             <div className="absolute top-10 left-10 w-20 h-20 border-t-8 border-l-8 rounded-tl-[3rem] border-sky-500/85"></div>
+             <div className="absolute top-10 right-10 w-20 h-20 border-t-8 border-r-8 rounded-tr-[3rem] border-sky-500/85"></div>
+             <div className="absolute bottom-10 left-10 w-20 h-20 border-b-8 border-l-8 rounded-bl-[3rem] border-sky-500/85"></div>
+             <div className="absolute bottom-10 right-10 w-20 h-20 border-b-8 border-r-8 rounded-br-[3rem] border-sky-500/85"></div>
+             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 border-4 rounded-full animate-ping border-sky-500/20"></div>
           </div>
           
           <video 
@@ -1761,14 +1803,14 @@ export default function App() {
           
           {cameraError && (
              <div className="absolute inset-0 bg-white/95 flex flex-col items-center justify-center p-8 z-30 backdrop-blur-lg">
-               <div className="w-20 h-20 bg-orange-50 text-orange-500 rounded-[2rem] flex items-center justify-center mb-6">
-                 <AlertTriangle className="w-10 h-10" />
+               <div className="w-20 h-20 bg-slate-50 text-slate-400 rounded-[2rem] flex items-center justify-center mb-6">
+                 <Camera className="w-10 h-10 animate-pulse text-indigo-400" />
                </div>
                <h3 className="text-xl font-bold text-slate-800 mb-2">Camera Access Notice</h3>
                <p className="text-sm text-slate-400 font-bold mb-8 text-center">{cameraError}</p>
                <button 
                  onClick={() => startVideoStream()}
-                 className="bg-indigo-600 text-white font-bold px-10 py-4 rounded-3xl shadow-xl bouncy animate-bounce"
+                 className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-10 py-4 rounded-3xl shadow-xl bouncy"
                >
                  Try Again
                </button>
@@ -1777,90 +1819,67 @@ export default function App() {
 
           {loading && (
             <div className="absolute inset-0 bg-white/90 flex flex-col items-center justify-center gap-6 z-20 backdrop-blur-md">
-              <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: 'linear' }} className="w-16 h-16 text-indigo-600 rounded-full flex items-center justify-center"><Loader2 className="w-16 h-16 animate-spin" /></motion.div>
-              <p className="text-xl font-bold text-slate-800">Reading packing label...</p>
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest animate-pulse max-w-xs text-center">Gemini is translating foreign labels in real-time...</p>
+              <motion.div animate={{ rotate: 360 }} transition={{ duration: 2, repeat: Infinity, ease: 'linear' }} className="w-16 h-16 text-indigo-600 rounded-full flex items-center justify-center">
+                <Loader2 className="w-16 h-16 animate-spin" />
+              </motion.div>
+              <p className="text-xl font-bold text-slate-800">Reading barcode...</p>
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest animate-pulse max-w-xs text-center">Looking up product statistics...</p>
             </div>
           )}
 
           {!scanning && !loading && !scannedProduct && !cameraError && (
             <div className="absolute inset-0 bg-white/50 backdrop-blur-sm flex flex-col items-center justify-center gap-6 z-20">
-              <div className="w-20 h-20 bg-indigo-50 text-indigo-600 rounded-[2rem] flex items-center justify-center shadow-inner">
+              <div className="w-20 h-20 bg-indigo-50 text-indigo-600 rounded-[2rem] flex items-center justify-center shadow-inner animate-pulse">
                 <Camera className="w-10 h-10" />
               </div>
               <button 
                 onClick={() => startVideoStream()}
-                className="bg-indigo-600 text-white font-bold px-10 py-5 rounded-[2rem] shadow-2xl bouncy flex items-center gap-3 animate-pulse"
+                className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-10 py-5 rounded-[2rem] shadow-2xl bouncy flex items-center gap-3"
               >
                 <div className="w-2 h-2 bg-white rounded-full animate-ping" />
                 Open Live Scanner
               </button>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center px-10">Hold packaging flat under the target guides</p>
-            </div>
-          )}
-
-          {!scanning && !loading && !scannedProduct && !cameraError && (
-            <div className="text-slate-300 text-center p-12 absolute z-0 pointer-events-none">
-              <Camera className="w-20 h-20 mx-auto mb-8 opacity-10" />
-              <p className="text-lg font-bold">Wake up the Camera Feed!</p>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center px-10">Hold standard barcode flat under coordinates reticle</p>
             </div>
           )}
         </div>
 
         {!loading && !scannedProduct && (
-          <div className="p-10 space-y-8 bg-white">
-            
-            {scanning && (
-              <div className="flex flex-col pb-8 border-b border-slate-100 gap-6">
-                <div className="w-full">
-                  {/* AI Vision Scan */}
-                  <button
-                    onClick={captureAndScanAI}
-                    disabled={isCapturing}
-                    type="button"
-                    className="w-full bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white font-black px-6 py-5 rounded-[2rem] shadow-xl hover:shadow-2xl disabled:bg-slate-350 active:scale-[0.98] transition-all flex items-center justify-center gap-2 bouncy text-base"
-                  >
-                    {isCapturing ? (
-                      <>
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        AI Analysis in Progress...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-5 h-5 animate-pulse" />
-                        Snap and Scan Label with AI
-                      </>
-                    )}
-                  </button>
-                </div>
+          <div className="p-10 space-y-6 bg-white">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <button
+                onClick={captureAndScan}
+                disabled={isCapturing || !scanning}
+                type="button"
+                className="bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-600 hover:to-indigo-700 text-white font-black px-6 py-5 rounded-[2rem] shadow-xl hover:shadow-2xl disabled:opacity-50 active:scale-[0.98] transition-all flex items-center justify-center gap-2 bouncy text-base"
+              >
+                {isCapturing ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    Capturing...
+                  </>
+                ) : (
+                  <>
+                    <Camera className="w-5 h-5 animate-pulse" />
+                    Capture Frame
+                  </>
+                )}
+              </button>
 
-                {/* Direct High-res photo upload using native system camera */}
-                <div className="bg-gradient-to-br from-violet-50 to-indigo-50/50 p-6 rounded-3xl border border-indigo-100/50 flex flex-col sm:flex-row items-center justify-between gap-4 text-center sm:text-left">
-                  <div className="flex-1">
-                    <h4 className="text-sm font-bold text-slate-800 flex items-center gap-2 justify-center sm:justify-start">
-                      <Sparkles className="w-4 h-4 text-violet-500" />
-                      Take Photo with Phone Camera
-                    </h4>
-                    <p className="text-xs text-slate-500 font-medium mt-1 leading-normal">
-                      Struggling with webcam focus? Use your device's native high-res camera to snap and parse any label.
-                    </p>
-                  </div>
-                  <label className="bg-white hover:bg-violet-50 border border-indigo-200 text-indigo-600 py-3 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-sm shrink-0 whitespace-nowrap inline-block">
-                    Camera Roll / Snap
-                    <input 
-                      type="file" 
-                      accept="image/*" 
-                      capture="environment" 
-                      onChange={handleAIScanUpload}
-                      className="hidden" 
-                    />
-                  </label>
-                </div>
-              </div>
-            )}
+              <label className="bg-white hover:bg-slate-50 text-slate-700 border-2 border-slate-200 hover:border-indigo-200 font-bold px-6 py-5 rounded-[2rem] shadow-sm hover:shadow-md active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer text-sm duration-200 text-center">
+                <Camera className="w-4 h-4 text-indigo-600 animate-pulse" />
+                Manual Photo Upload
+                <input 
+                  type="file" 
+                  accept="image/*" 
+                  onChange={handleAIScanUpload}
+                  className="hidden" 
+                />
+              </label>
+            </div>
 
-            <p className="text-xs text-center text-slate-400 font-bold uppercase tracking-widest">
-              Scan any packaging or list of ingredients.
+            <p className="text-xs text-center text-slate-400 font-bold uppercase tracking-widest leading-relaxed">
+              Align barcode under scanner guidelines or upload a photo of the barcode to search standard EAN/UPC identifier.
             </p>
             
             {scanError && (
@@ -1927,17 +1946,40 @@ export default function App() {
         {scannedProduct && (
           <motion.div initial={{ y: 50, opacity: 0, scale: 0.95 }} animate={{ y: 0, opacity: 1, scale: 1 }} exit={{ y: 50, opacity: 0, scale: 0.95 }} className="bg-white rounded-[3.5rem] shadow-2xl p-10 space-y-8 relative border-8 border-sky-50 overflow-hidden">
             <div className="flex gap-8 items-start">
-              {scannedProduct.image ? (
-                <img src={scannedProduct.image} alt="Product" className="w-28 h-28 object-cover rounded-3xl shadow-lg border-4 border-white shrink-0" referrerPolicy="no-referrer" />
-              ) : (
-                <div className="w-28 h-28 bg-slate-50 rounded-3xl flex items-center justify-center text-slate-200 border-4 border-white shrink-0 shadow-inner">
-                  {scannedProduct.barcode === 'MANUAL' ? (
-                    <Sparkles className="w-14 h-14 text-violet-400" />
-                  ) : (
-                    <Barcode className="w-14 h-14" />
-                  )}
+              <label className="relative w-28 h-28 cursor-pointer group shrink-0 select-none block active:scale-95 transition-all">
+                {scannedProduct.image ? (
+                  <img src={scannedProduct.image} alt="Product" className="w-28 h-28 object-cover rounded-3xl shadow-lg border-4 border-white" referrerPolicy="no-referrer" />
+                ) : (
+                  <div className="w-28 h-28 bg-slate-50 rounded-3xl flex flex-col items-center justify-center text-slate-350 border-4 border-white shadow-inner gap-1">
+                    {scannedProduct.barcode === 'MANUAL' ? (
+                      <Sparkles className="w-8 h-8 text-violet-400" />
+                    ) : (
+                      <Barcode className="w-8 h-8" />
+                    )}
+                    <span className="text-[9px] font-black uppercase text-slate-400">Add Photo</span>
+                  </div>
+                )}
+                <div className="absolute inset-0 bg-black/40 rounded-3xl opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white text-xs font-black uppercase gap-1">
+                  <Pencil className="w-4 h-4" />
+                  Change
                 </div>
-              )}
+                <input 
+                  type="file" 
+                  accept="image/*" 
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      const reader = new FileReader();
+                      reader.onloadend = () => {
+                        const base64 = reader.result as string;
+                        setScannedProduct(prev => prev ? { ...prev, image: base64 } : null);
+                      };
+                      reader.readAsDataURL(file);
+                    }
+                  }}
+                  className="hidden" 
+                />
+              </label>
               <div className="flex-1 min-w-0">
                 <h3 className="text-3xl font-bold text-slate-800 leading-tight mb-2 truncate">{scannedProduct.name}</h3>
                 <p className="text-sm uppercase tracking-widest text-slate-400 font-bold mb-4">{scannedProduct.brand}</p>
@@ -2684,13 +2726,36 @@ export default function App() {
                 
                 {/* Header Section */}
                 <div className="flex gap-6 items-start mb-8">
-                  <div className={`w-20 h-20 rounded-2xl flex items-center justify-center overflow-hidden border-4 border-white shadow-md ${selectedLogItem.reaction ? 'bg-orange-50' : 'bg-sky-50'} shrink-0`}>
+                  <label className={`w-20 h-20 rounded-2xl flex items-center justify-center overflow-hidden border-4 border-white shadow-md cursor-pointer group relative shrink-0 active:scale-95 transition-all ${selectedLogItem.reaction ? 'bg-orange-50' : 'bg-sky-50'}`}>
                     {selectedLogItem.image ? (
                       <img src={selectedLogItem.image} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                     ) : (
-                      <Barcode className="w-10 h-10 text-slate-300" />
+                      <div className="flex flex-col items-center justify-center gap-1">
+                        <Barcode className="w-6 h-6 text-slate-305 text-slate-300" />
+                        <span className="text-[8px] font-black uppercase text-slate-400">Add Foto</span>
+                      </div>
                     )}
-                  </div>
+                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white text-[9px] font-black uppercase gap-0.5">
+                      <Pencil className="w-3 h-3" />
+                      Edit
+                    </div>
+                    <input 
+                      type="file" 
+                      accept="image/*" 
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onloadend = () => {
+                            const base64 = reader.result as string;
+                            setHistory(history.map(h => h.id === selectedLogItem.id ? { ...h, image: base64 } : h));
+                          };
+                          reader.readAsDataURL(file);
+                        }
+                      }}
+                      className="hidden" 
+                    />
+                  </label>
                   <div className="flex-1 min-w-0">
                     <span className="text-[9px] font-black bg-slate-100 text-slate-500 px-3 py-1 rounded-full uppercase tracking-wider mb-2 inline-block">
                       {selectedLogItem.barcode === 'MANUAL' ? 'Manual Label' : `Barcode: ${selectedLogItem.barcode}`}
