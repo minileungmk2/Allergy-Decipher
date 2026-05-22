@@ -106,18 +106,27 @@ router.post("/gemini/analyze-photo", async (req, res) => {
       }
     };
 
-    const promptText = `Analyze this product package or ingredients list label image.
-Extract as many fields as possible to help with food allergy tracking.
-Focus heavily on accuracy.
-CRITICAL: If the label or any texts in the image are in a language other than English (for example: German, French, Spanish, Chinese, Japanese, Italian, etc.), you MUST automatically translate everything (including the product "name", "brand", verbatim "ingredientsText", "ingredientsList" items, and "allergens") into accurate, natural English.
-If you can read any numeric barcode digits printed on the package (usually located underneath vertical lines, typically 8, 12, or 13 digits), put them in "detectedBarcode".
-Otherwise, if you cannot find a readable barcode but see the brand and name, put them in "detectedTextSearch".
-In "productDetails", extract (always translating any foreign entries to English):
-- "name": descriptive name of the food product in English (e.g. 'Gluten Free Oat Bread' or 'Cocoa Spread').
-- "brand": the food brand (e.g. 'Biona' or 'Livia's').
-- "ingredientsText": the complete, verbose text of the ingredients list exactly as written on the package label, but translated fully to English.
-- "ingredientsList": a clean array of individual ingredient strings, converted to lowercase, trimmed, and translated fully to English.
-- "allergens": clear list of common typical allergens detected in the ingredients, translated fully to English (e.g., ['gluten', 'dairy', 'wheat', 'soy', 'peanuts', 'tree nuts', 'eggs', 'sesame']).`;
+    const promptText = `Analyze this food product label, packaging image, ingredients list, or barcode image.
+Your focus is to extract product details to help with food allergy tracking.
+Follow these extreme accuracy instructions:
+
+1. BARCODE EXTRACTION (CRITICAL FOR USER CAPTURES):
+- If there is a barcode in the image, locate the printed numeric digits directly underneath, next to, or inside the vertical barcode stripes (e.g., numbers like '5 063445 793970 >' as shown on packages).
+- You MUST transcribe these exact digits carefully into "detectedBarcode". Format it as a clean, continuous numeric string with NO spaces, NO dashes, NO parentheses, and ignore any terminal symbol like '>' or '<' (for example: output '5063445793970').
+- If there is absolutely no barcode, or the numbers are completely unreadable, you may leave "detectedBarcode" as an empty string or null, but look for any brand/name to set in "detectedTextSearch".
+
+2. INGREDIENTS LIST & ALLERGENS EXTRACTION (CRITICAL FOR INGREDIENTS CHECKS & RE-SCANS):
+- Locate the main INGREDIENTS section (often labeled 'INGREDIENTS' or 'Zutaten', etc.) on the packaging label (as in typical product ingredient panels).
+- Translate any foreign ingredients text entirely into natural, clear English.
+- Populate "ingredientsText" with the full verbose text of the ingredients.
+- Parse individual ingredients into a clean array in "ingredientsList", converted to lowercase and trimmed of extra markers (like percentage numbers or brackets e.g. 'sugar', 'crisped rice', 'soya lecithins').
+- List typical allergen groups present inside "allergens" (e.g. 'gluten', 'dairy', 'wheat', 'soy', 'peanuts', 'tree nuts', 'eggs', 'sesame', 'mustard', 'celery').
+
+3. LANGUAGE TRANSLATION:
+- If any text in the image is in a foreign language (such as German, French, Spanish, Chinese, Japanese, Italian, etc.), you MUST translate everything (Product name, brand, ingredients, allergens) into natural, clean English.
+
+4. DYNAMIC SUCCESS:
+- "success" MUST be true if you successfully extracted either: the barcode digits, the product name/brand, OR the ingredients list list. Set success to true even if no barcode was detected, as long as you read ingredients/names successfully from the image (e.g. during an ingredient re-scan).`;
 
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",

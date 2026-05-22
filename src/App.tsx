@@ -467,6 +467,15 @@ export default function App() {
   const [longPressedId, setLongPressedId] = useState<string | null>(null);
   const longPressTimer = useRef<NodeJS.Timeout | null>(null);
 
+  // Live Ingredients Camera Scanner state
+  const [isIngCameraActive, setIsIngCameraActive] = useState<boolean>(false);
+  const [ingCameraTarget, setIngCameraTarget] = useState<'scanned' | 'log' | null>(null);
+  const [ingCameraLogId, setIngCameraLogId] = useState<string | null>(null);
+  const [ingCameraError, setIngCameraError] = useState<string | null>(null);
+  const [isIngAnalyzing, setIsIngAnalyzing] = useState<boolean>(false);
+  const ingVideoRef = useRef<HTMLVideoElement>(null);
+  const ingStreamRef = useRef<MediaStream | null>(null);
+
   const startLongPress = (id: string) => {
     longPressTimer.current = setTimeout(() => {
       setLongPressedId(id);
@@ -674,14 +683,58 @@ export default function App() {
     setEditingProfile(null);
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const resizeAndCompressImage = (file: File, maxWidth = 1000, maxHeight = 1000): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > maxWidth) {
+              height = Math.round((height * maxWidth) / width);
+              width = maxWidth;
+            }
+          } else {
+            if (height > maxHeight) {
+              width = Math.round((width * maxHeight) / height);
+              height = maxHeight;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(e.target?.result as string);
+            return;
+          }
+
+          ctx.drawImage(img, 0, 0, width, height);
+          const compressedBase64 = canvas.toDataURL('image/jpeg', 0.85);
+          resolve(compressedBase64);
+        };
+        img.onerror = (err) => reject(err);
+        img.src = e.target?.result as string;
+      };
+      reader.onerror = (err) => reject(err);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setEditImage(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      try {
+        const compressed = await resizeAndCompressImage(file, 400, 400);
+        setEditImage(compressed);
+      } catch (err) {
+        console.error("Failed to process image:", err);
+      }
     }
   };
 
@@ -1056,9 +1109,16 @@ export default function App() {
         await fetchProduct(codeText);
         return;
       } catch (err) {
-        console.error("Strategy 3 failed:", err);
-        setScanError("No barcode detected. Ensure the code is flat, well-lit, aligned inside the viewfinder guidelines, and try scanning again. Or use manual search below!");
-        setIsCapturing(false);
+        console.warn("Strategy 3 coordinate scan failed, triggering automatic high-fidelity Gemini OCR fallback...");
+        try {
+          const base64 = canvas.toDataURL('image/png');
+          setIsCapturing(false);
+          await analyzeWithAIVision(base64);
+        } catch (visionErr: any) {
+          console.error("Gemini OCR fallback failed:", visionErr);
+          setScanError("No barcode detected. Ensure the barcode numbers and vertical lines are clearly visible inside the scanner viewfinder, and try scanning again.");
+          setIsCapturing(false);
+        }
       }
 
     } catch (err: any) {
@@ -1156,15 +1216,16 @@ export default function App() {
     }
   };
 
-  const handleAIScanUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAIScanUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       setLoading(true);
       setScanError(null);
       
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64 = reader.result as string;
+      try {
+        console.log("Compressing uploaded image to prevent backend size limits...");
+        const base64 = await resizeAndCompressImage(file, 1200, 1200);
+        
         try {
           console.log("Parsing barcode client-side with native scanner engine...");
           const barcodeData = await scanFileBarcode(file);
@@ -1186,13 +1247,13 @@ export default function App() {
             }
 
             const data = await res.json();
-            if (data.success && data.detectedBarcode) {
+            if (data.success && data.detectedBarcode && data.detectedBarcode !== "MANUAL" && data.detectedBarcode.trim() !== "") {
               console.log("Barcode extracted correctly:", data.detectedBarcode);
               await fetchProduct(data.detectedBarcode);
             } else if (data.success && data.productDetails) {
               stopVideoStream();
               setScannedProduct({
-                barcode: data.detectedBarcode || "MANUAL",
+                barcode: (data.detectedBarcode && data.detectedBarcode !== "MANUAL") ? data.detectedBarcode: "MANUAL",
                 name: data.productDetails.name || "Custom Item",
                 brand: data.productDetails.brand || "Custom Scanner",
                 ingredientsText: data.productDetails.ingredientsText || "Ingredients not listed.",
@@ -1206,12 +1267,14 @@ export default function App() {
           } catch (apiErr: any) {
             console.error("Advanced OCR extract issue:", apiErr);
             setScanError("No barcode detected in image. Please try a closer, well-lit photo of the barcode lines.");
-          } finally {
-            setLoading(false);
           }
         }
-      };
-      reader.readAsDataURL(file);
+      } catch (err: any) {
+        console.error("Image processing error:", err);
+        setScanError("Failed to import and compress image: " + (err.message || err));
+      } finally {
+        setLoading(false);
+      }
     }
   };
 
@@ -1222,26 +1285,212 @@ export default function App() {
     setIsVisionAnalyzingIngredients(true);
     setVisionIngredientsError(null);
     
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      try {
-        const base64 = reader.result as string;
-        const res = await fetch("/api/gemini/analyze-photo", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ image: base64 })
+    try {
+      console.log("Compressing back of package ingredients scan...");
+      const base64 = await resizeAndCompressImage(file, 1200, 1200);
+      const res = await fetch("/api/gemini/analyze-photo", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ image: base64 })
+      });
+
+      if (!res.ok) {
+        throw new Error("AI parser failed with status: " + res.status);
+      }
+
+      const data = await res.json();
+      if (data.success && data.productDetails) {
+        const updatedHistory = history.map(h => {
+          if (h.id === logId) {
+            return {
+              ...h,
+              ingredientsText: data.productDetails.ingredientsText || h.ingredientsText,
+              ingredientsList: data.productDetails.ingredientsList || h.ingredientsList,
+              allergens: data.productDetails.allergens || h.allergens,
+              name: h.name === "Unknown Product" || !h.name ? (data.productDetails.name || h.name) : h.name,
+              brand: h.brand === "Unknown Brand" || !h.brand ? (data.productDetails.brand || h.brand) : h.brand,
+            };
+          }
+          return h;
         });
+        setHistory(updatedHistory);
+        await saveData(profiles, updatedHistory);
+      } else {
+        setVisionIngredientsError("AI wasn't able to extract ingredients label details. Ensure you take a direct, high-quality, flat photo of the ingredients list.");
+      }
+    } catch (err: any) {
+      console.error("AI ingredient auto-register error:", err);
+      setVisionIngredientsError("Failed to auto-register ingredients: " + (err.message || err));
+    } finally {
+      setIsVisionAnalyzingIngredients(false);
+    }
+  };
 
-        if (!res.ok) {
-          throw new Error("AI parser failed with status: " + res.status);
-        }
+  const handleScanIngredientsForScannedProduct = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-        const data = await res.json();
-        if (data.success && data.productDetails) {
+    setIsVisionAnalyzingIngredients(true);
+    setVisionIngredientsError(null);
+    
+    try {
+      console.log("Compressing back of package ingredients scan...");
+      const base64 = await resizeAndCompressImage(file, 1200, 1200);
+      const res = await fetch("/api/gemini/analyze-photo", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ image: base64 })
+      });
+
+      if (!res.ok) {
+        throw new Error("AI parser failed with status: " + res.status);
+      }
+
+      const data = await res.json();
+      if (data.success && data.productDetails) {
+        setScannedProduct(prev => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            ingredientsText: data.productDetails.ingredientsText || prev.ingredientsText,
+            ingredientsList: data.productDetails.ingredientsList || prev.ingredientsList,
+            allergens: data.productDetails.allergens || prev.allergens,
+            name: prev.name === "Unknown Product" || !prev.name ? (data.productDetails.name || prev.name) : prev.name,
+            brand: prev.brand === "Unknown Brand" || !prev.brand ? (data.productDetails.brand || prev.brand) : prev.brand,
+          };
+        });
+      } else {
+        setVisionIngredientsError("AI wasn't able to extract ingredients label details. Ensure you take a direct, high-quality, flat photo of the ingredients list.");
+      }
+    } catch (err: any) {
+      console.error("AI ingredient auto-register error:", err);
+      setVisionIngredientsError("Failed to auto-register ingredients: " + (err.message || err));
+    } finally {
+      setIsVisionAnalyzingIngredients(false);
+    }
+  };
+
+  const startIngCamera = async () => {
+    setIngCameraError(null);
+    setIsIngAnalyzing(false);
+    
+    // Stop standard scanner/video streams to avoid resource conflict
+    stopVideoStream();
+    stopScanner();
+
+    const constraintsList = [
+      {
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      },
+      {
+        video: true,
+        audio: false
+      }
+    ];
+
+    let stream: MediaStream | null = null;
+    let lastErr: any = null;
+
+    for (const constraints of constraintsList) {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (stream) break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    if (!stream) {
+      const errMsg = lastErr?.name === "NotAllowedError" || lastErr?.message?.includes("Permission")
+        ? "Camera permission was denied. Try enabling camera access inside your browser settings."
+        : "Could not access camera. Make sure no other apps are using it, or trigger via manual upload fallback below.";
+      setIngCameraError(errMsg);
+      return;
+    }
+
+    ingStreamRef.current = stream;
+    if (ingVideoRef.current) {
+      ingVideoRef.current.srcObject = stream;
+      ingVideoRef.current.playsInline = true;
+      ingVideoRef.current.muted = true;
+      ingVideoRef.current.play().catch(e => console.warn("Live ingredient video play error", e));
+    }
+  };
+
+  const stopIngCamera = () => {
+    if (ingStreamRef.current) {
+      ingStreamRef.current.getTracks().forEach(track => {
+        try { track.stop(); } catch (e) {}
+      });
+      ingStreamRef.current = null;
+    }
+    if (ingVideoRef.current) {
+      ingVideoRef.current.srcObject = null;
+    }
+    setIsIngCameraActive(false);
+  };
+
+  const captureAndScanIngredients = async () => {
+    if (!ingVideoRef.current || isIngAnalyzing) return;
+    setIsIngAnalyzing(true);
+    setIngCameraError(null);
+
+    // Visual camera snapshot flash animation
+    setShutterActive(true);
+    setTimeout(() => setShutterActive(false), 200);
+
+    try {
+      const video = ingVideoRef.current;
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
+      
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        throw new Error("Could not acquire 2D drawing context of ingredients scanner.");
+      }
+      
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const base64 = canvas.toDataURL("image/jpeg", 0.9);
+
+      const res = await fetch("/api/gemini/analyze-photo", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ image: base64 })
+      });
+
+      if (!res.ok) {
+        throw new Error("Ingredients AI scan returned status: " + res.status);
+      }
+
+      const data = await res.json();
+      if (data.success && data.productDetails) {
+        if (ingCameraTarget === 'scanned') {
+          setScannedProduct(prev => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              ingredientsText: data.productDetails.ingredientsText || prev.ingredientsText,
+              ingredientsList: data.productDetails.ingredientsList || prev.ingredientsList,
+              allergens: data.productDetails.allergens || prev.allergens,
+              name: prev.name === "Unknown Product" || !prev.name ? (data.productDetails.name || prev.name) : prev.name,
+              brand: prev.brand === "Unknown Brand" || !prev.brand ? (data.productDetails.brand || prev.brand) : prev.brand,
+            };
+          });
+        } else if (ingCameraTarget === 'log' && ingCameraLogId) {
           const updatedHistory = history.map(h => {
-            if (h.id === logId) {
+            if (h.id === ingCameraLogId) {
               return {
                 ...h,
                 ingredientsText: data.productDetails.ingredientsText || h.ingredientsText,
@@ -1255,67 +1504,31 @@ export default function App() {
           });
           setHistory(updatedHistory);
           await saveData(profiles, updatedHistory);
-        } else {
-          setVisionIngredientsError("AI wasn't able to extract ingredients label details. Ensure you take a direct, high-quality, flat photo of the ingredients list.");
         }
-      } catch (err: any) {
-        console.error("AI ingredient auto-register error:", err);
-        setVisionIngredientsError("Failed to auto-register ingredients: " + (err.message || err));
-      } finally {
-        setIsVisionAnalyzingIngredients(false);
+        
+        // Success! Stop camera and exit modal
+        stopIngCamera();
+      } else {
+        setIngCameraError("AI scanner was unable to analyze ingredients list. Make sure the panel text is in frame, well lit, and click try again.");
       }
-    };
-    reader.readAsDataURL(file);
+    } catch (err: any) {
+      console.error("Ingredients OCR capture failure:", err);
+      setIngCameraError("Live Ingredients OCR failure: " + (err.message || err));
+    } finally {
+      setIsIngAnalyzing(false);
+    }
   };
 
-  const handleScanIngredientsForScannedProduct = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setIsVisionAnalyzingIngredients(true);
-    setVisionIngredientsError(null);
-    
-    const reader = new FileReader();
-    reader.onloadend = async () => {
-      try {
-        const base64 = reader.result as string;
-        const res = await fetch("/api/gemini/analyze-photo", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ image: base64 })
-        });
-
-        if (!res.ok) {
-          throw new Error("AI parser failed with status: " + res.status);
-        }
-
-        const data = await res.json();
-        if (data.success && data.productDetails) {
-          setScannedProduct(prev => {
-            if (!prev) return null;
-            return {
-              ...prev,
-              ingredientsText: data.productDetails.ingredientsText || prev.ingredientsText,
-              ingredientsList: data.productDetails.ingredientsList || prev.ingredientsList,
-              allergens: data.productDetails.allergens || prev.allergens,
-              name: prev.name === "Unknown Product" || !prev.name ? (data.productDetails.name || prev.name) : prev.name,
-              brand: prev.brand === "Unknown Brand" || !prev.brand ? (data.productDetails.brand || prev.brand) : prev.brand,
-            };
-          });
-        } else {
-          setVisionIngredientsError("AI wasn't able to extract ingredients label details. Ensure you take a direct, high-quality, flat photo of the ingredients list.");
-        }
-      } catch (err: any) {
-        console.error("AI ingredient auto-register error:", err);
-        setVisionIngredientsError("Failed to auto-register ingredients: " + (err.message || err));
-      } finally {
-        setIsVisionAnalyzingIngredients(false);
-      }
+  useEffect(() => {
+    if (isIngCameraActive) {
+      startIngCamera();
+    } else {
+      stopIngCamera();
+    }
+    return () => {
+      stopIngCamera();
     };
-    reader.readAsDataURL(file);
-  };
+  }, [isIngCameraActive]);
 
   const fetchProduct = async (barcode: string) => {
     setLoading(true);
@@ -1966,15 +2179,15 @@ export default function App() {
                 <input 
                   type="file" 
                   accept="image/*" 
-                  onChange={(e) => {
+                  onChange={async (e) => {
                     const file = e.target.files?.[0];
                     if (file) {
-                      const reader = new FileReader();
-                      reader.onloadend = () => {
-                        const base64 = reader.result as string;
+                      try {
+                        const base64 = await resizeAndCompressImage(file, 800, 800);
                         setScannedProduct(prev => prev ? { ...prev, image: base64 } : null);
-                      };
-                      reader.readAsDataURL(file);
+                      } catch (err) {
+                        console.error("Image compression failed:", err);
+                      }
                     }
                   }}
                   className="hidden" 
@@ -2010,27 +2223,27 @@ export default function App() {
                     Quick-Scan packaging back with AI to instantly translate, register & cross-check ingredients!
                   </p>
                 </div>
-                <label className="inline-flex bg-indigo-600 hover:bg-indigo-700 text-white py-3 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-md items-center gap-2">
-                  {isVisionAnalyzingIngredients ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Analyzing package...
-                    </>
-                  ) : (
-                    <>
-                      <Camera className="w-4 h-4" />
-                      Scan Back of Package
-                    </>
-                  )}
-                  <input 
-                    type="file" 
-                    accept="image/*" 
-                    capture="environment" 
-                    onChange={handleScanIngredientsForScannedProduct}
-                    className="hidden" 
-                    disabled={isVisionAnalyzingIngredients}
-                  />
-                </label>
+                <div className="flex flex-col items-center gap-2">
+                  <button 
+                    type="button"
+                    onClick={() => { setIngCameraTarget('scanned'); setIsIngCameraActive(true); }}
+                    className="inline-flex bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white py-3.5 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-md items-center gap-2"
+                  >
+                    <Camera className="w-4 h-4 text-white animate-pulse" />
+                    Open Live Ingredients Camera
+                  </button>
+                  <label className="text-[10px] text-slate-400 hover:text-slate-600 font-bold cursor-pointer underline inline-block mt-1">
+                    Or upload label photo...
+                    <input 
+                      type="file" 
+                      accept="image/*" 
+                      capture="environment" 
+                      onChange={handleScanIngredientsForScannedProduct}
+                      className="hidden" 
+                      disabled={isVisionAnalyzingIngredients}
+                    />
+                  </label>
+                </div>
                 {visionIngredientsError && (
                   <p className="text-[10px] text-orange-500 font-bold">{visionIngredientsError}</p>
                 )}
@@ -2040,17 +2253,26 @@ export default function App() {
                 <div className="p-8 bg-sky-50/50 rounded-[2.5rem] border-4 border-white shadow-inner relative overflow-hidden">
                   <div className="flex justify-between items-center mb-2">
                     <p className="text-sm font-semibold text-slate-500 uppercase tracking-widest text-[9px]">Verdict Ingredients Text</p>
-                    <label className="text-[10px] font-black text-indigo-505 hover:text-indigo-600 cursor-pointer flex items-center gap-1 text-indigo-500">
-                      <Camera className="w-3.5 h-3.5" /> Re-scan Package Back
-                      <input 
-                        type="file" 
-                        accept="image/*" 
-                        capture="environment" 
-                        onChange={handleScanIngredientsForScannedProduct}
-                        className="hidden" 
-                        disabled={isVisionAnalyzingIngredients}
-                      />
-                    </label>
+                    <div className="flex items-center gap-3">
+                      <button 
+                        type="button"
+                        onClick={() => { setIngCameraTarget('scanned'); setIsIngCameraActive(true); }}
+                        className="text-[10px] font-black text-indigo-600 hover:text-indigo-800 flex items-center gap-1 bg-white px-2.5 py-1 rounded-xl shadow-sm border border-slate-100"
+                      >
+                        <Camera className="w-3.5 h-3.5 animate-pulse" /> Re-scan (Live)
+                      </button>
+                      <label className="text-[10px] font-bold text-slate-400 hover:text-slate-600 cursor-pointer underline">
+                        Upload...
+                        <input 
+                          type="file" 
+                          accept="image/*" 
+                          capture="environment" 
+                          onChange={handleScanIngredientsForScannedProduct}
+                          className="hidden" 
+                          disabled={isVisionAnalyzingIngredients}
+                        />
+                      </label>
+                    </div>
                   </div>
                   <p className="text-sm font-medium text-slate-600 leading-relaxed line-clamp-4">{scannedProduct.ingredientsText}</p>
                   {isVisionAnalyzingIngredients && (
@@ -2742,15 +2964,17 @@ export default function App() {
                     <input 
                       type="file" 
                       accept="image/*" 
-                      onChange={(e) => {
+                      onChange={async (e) => {
                         const file = e.target.files?.[0];
                         if (file) {
-                          const reader = new FileReader();
-                          reader.onloadend = () => {
-                            const base64 = reader.result as string;
-                            setHistory(history.map(h => h.id === selectedLogItem.id ? { ...h, image: base64 } : h));
-                          };
-                          reader.readAsDataURL(file);
+                          try {
+                            const base64 = await resizeAndCompressImage(file, 800, 800);
+                            const updatedHistory = history.map(h => h.id === selectedLogItem.id ? { ...h, image: base64 } : h);
+                            setHistory(updatedHistory);
+                            await saveData(profiles, updatedHistory);
+                          } catch (err) {
+                            console.error("Image compression/save failed:", err);
+                          }
                         }
                       }}
                       className="hidden" 
@@ -2842,27 +3066,31 @@ export default function App() {
                           Snap the back of the package ingredients list with AI to automatically retrieve and translate details!
                         </p>
                       </div>
-                      <label className="inline-flex bg-indigo-600 hover:bg-indigo-700 text-white py-3.5 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-md items-center gap-2">
-                        {isVisionAnalyzingIngredients ? (
-                          <>
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                            Analyzing packaging...
-                          </>
-                        ) : (
-                          <>
-                            <Camera className="w-4 h-4" />
-                            Scan Back of Package
-                          </>
-                        )}
-                        <input 
-                          type="file" 
-                          accept="image/*" 
-                          capture="environment" 
-                          onChange={(e) => handleScanIngredientsForLog(e, selectedLogItem.id)}
-                          className="hidden" 
-                          disabled={isVisionAnalyzingIngredients}
-                        />
-                      </label>
+                      <div className="flex flex-col items-center gap-2">
+                        <button 
+                          type="button"
+                          onClick={() => { 
+                            setIngCameraTarget('log'); 
+                            setIngCameraLogId(selectedLogItem.id); 
+                            setIsIngCameraActive(true); 
+                          }}
+                          className="inline-flex bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-700 hover:to-violet-700 text-white py-3.5 px-6 rounded-[1.5rem] font-black text-xs uppercase cursor-pointer active:scale-95 transition-all shadow-md items-center gap-2 animate-bounce"
+                        >
+                          <Camera className="w-4 h-4 text-white animate-pulse" />
+                          Open Live Ingredients Camera
+                        </button>
+                        <label className="text-[10px] text-slate-400 hover:text-slate-600 font-bold cursor-pointer underline inline-block mt-1">
+                          Or upload label photo...
+                          <input 
+                            type="file" 
+                            accept="image/*" 
+                            capture="environment" 
+                            onChange={(e) => handleScanIngredientsForLog(e, selectedLogItem.id)}
+                            className="hidden" 
+                            disabled={isVisionAnalyzingIngredients}
+                          />
+                        </label>
+                      </div>
                       {visionIngredientsError && (
                         <p className="text-[10px] text-orange-500 font-bold mt-2">{visionIngredientsError}</p>
                       )}
@@ -2879,17 +3107,30 @@ export default function App() {
                         <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
                           Cross-Checked Ingredients ({selectedLogItem.ingredientsList.length})
                         </span>
-                        <label className="text-[10px] font-black text-indigo-505 hover:text-indigo-600 cursor-pointer flex items-center gap-1 text-indigo-500">
-                          <Camera className="w-3.5 h-3.5" /> Re-scan
-                          <input 
-                            type="file" 
-                            accept="image/*" 
-                            capture="environment" 
-                            onChange={(e) => handleScanIngredientsForLog(e, selectedLogItem.id)}
-                            className="hidden" 
-                            disabled={isVisionAnalyzingIngredients}
-                          />
-                        </label>
+                        <div className="flex items-center gap-3">
+                          <button 
+                            type="button"
+                            onClick={() => { 
+                              setIngCameraTarget('log'); 
+                              setIngCameraLogId(selectedLogItem.id); 
+                              setIsIngCameraActive(true); 
+                            }}
+                            className="text-[10px] font-black text-indigo-550 hover:text-indigo-750 flex items-center gap-1 bg-white px-2.5 py-1 rounded-xl shadow-sm border border-slate-100"
+                          >
+                            <Camera className="w-3.5 h-3.5 animate-pulse" /> Re-scan (Live)
+                          </button>
+                          <label className="text-[10px] font-semibold text-slate-405 hover:text-slate-605 cursor-pointer underline text-slate-400">
+                            Upload...
+                            <input 
+                              type="file" 
+                              accept="image/*" 
+                              capture="environment" 
+                              onChange={(e) => handleScanIngredientsForLog(e, selectedLogItem.id)}
+                              className="hidden" 
+                              disabled={isVisionAnalyzingIngredients}
+                            />
+                          </label>
+                        </div>
                       </div>
                       
                       {/* Table Layout */}
@@ -3006,6 +3247,138 @@ export default function App() {
                 >
                   Yes, Remove
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Live Ingredients Scanner Camera Modal */}
+      <AnimatePresence>
+        {isIngCameraActive && (
+          <div className="fixed inset-0 z-[150] flex flex-col items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              exit={{ opacity: 0 }} 
+              onClick={stopIngCamera} 
+              className="absolute inset-0 bg-slate-950/80 backdrop-blur-xl" 
+            />
+            
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 50 }} 
+              animate={{ scale: 1, opacity: 1, y: 0 }} 
+              exit={{ scale: 0.9, opacity: 0, y: 50 }} 
+              transition={{ type: "spring", damping: 25, stiffness: 180 }}
+              className="bg-slate-900 text-white rounded-[3rem] w-full max-w-md p-6 shadow-3xl relative z-10 border-4 border-indigo-500/20 overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/10 shrink-0">
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping" />
+                  <span className="text-[10px] font-black uppercase tracking-widest text-indigo-400 animate-pulse">Ingredients Live Camera</span>
+                </div>
+                <button 
+                  type="button"
+                  onClick={stopIngCamera}
+                  className="bg-white/10 hover:bg-white/20 text-white/70 hover:text-white p-2 rounded-2xl transition-all cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="relative aspect-[3/4] bg-black rounded-2xl overflow-hidden border border-white/10 shrink-0 flex items-center justify-center">
+                <video
+                  ref={ingVideoRef}
+                  playsInline
+                  autoPlay
+                  muted
+                  className="absolute inset-0 w-full h-full object-cover z-0"
+                  style={{ display: 'block' }}
+                />
+
+                <AnimatePresence>
+                  {shutterActive && (
+                    <motion.div 
+                      initial={{ opacity: 1 }} 
+                      animate={{ opacity: 0 }} 
+                      exit={{ opacity: 0 }} 
+                      className="absolute inset-0 bg-white z-25" 
+                    />
+                  )}
+                </AnimatePresence>
+
+                <div className="absolute inset-0 flex flex-col items-center justify-between p-4 z-10 pointer-events-none">
+                  <div className="absolute inset-0 border-[3rem] border-black/50 pointer-events-none flex items-center justify-center">
+                    <div className="w-full h-full border-4 border-indigo-400 border-dashed rounded-xl relative shadow-[0_0_0_1000px_rgba(0,0,0,0.5)]">
+                      <span className="absolute -top-2.5 -left-2.5 w-6 h-6 border-t-4 border-l-4 border-sky-400 rounded-tl-md" />
+                      <span className="absolute -top-2.5 -right-2.5 w-6 h-6 border-t-4 border-r-4 border-sky-400 rounded-tr-md" />
+                      <span className="absolute -bottom-2.5 -left-2.5 w-6 h-6 border-b-4 border-l-4 border-sky-400 rounded-bl-md" />
+                      <span className="absolute -bottom-2.5 -right-2.5 w-6 h-6 border-b-4 border-r-4 border-sky-400 rounded-br-md" />
+                    </div>
+                  </div>
+
+                  <div className="w-full text-center pt-2">
+                    <span className="bg-slate-900/90 backdrop-blur-md text-sky-305 text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-full border border-sky-500/20 shadow-lg text-sky-400">
+                      Align label text inside viewfinder
+                    </span>
+                  </div>
+
+                  <div className="w-full text-center pb-2">
+                    <span className="bg-slate-900/90 backdrop-blur-md text-white/80 text-[10px] font-medium leading-relaxed px-4 py-1.5 rounded-full inline-block shadow-lg mx-6 text-center">
+                      Hold flat, steady, and snap photo of ingredients panel
+                    </span>
+                  </div>
+                </div>
+
+                {isIngAnalyzing && (
+                  <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center gap-4 z-20">
+                    <div className="relative">
+                      <div className="absolute inset-0 rounded-full border-4 border-indigo-500/20 animate-pulse" />
+                      <Loader2 className="w-14 h-14 animate-spin text-indigo-400" />
+                    </div>
+                    <div className="text-center space-y-1 px-8">
+                      <p className="text-base font-bold text-white tracking-tight">AI OCR Analyser running...</p>
+                      <p className="text-[10px] font-black text-indigo-400 uppercase tracking-widest animate-pulse">Scanning, translates & register ingredients list...</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-4 flex flex-col gap-3 grow overflow-y-auto">
+                {ingCameraError && (
+                  <div className="bg-red-500/15 border border-red-500/20 px-4 py-3 rounded-2xl text-[11px] text-red-400 font-bold leading-relaxed">
+                    ⚠️ {ingCameraError}
+                  </div>
+                )}
+
+                <div className="flex gap-4 items-center justify-between mt-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={stopIngCamera}
+                    className="flex-1 bg-white/5 hover:bg-white/10 border border-white/10 font-bold py-4 rounded-3xl text-xs uppercase tracking-widest transition-all text-white/80 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={captureAndScanIngredients}
+                    disabled={isIngAnalyzing}
+                    className="flex-[2] bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-600 hover:to-indigo-700 text-white font-black py-4 rounded-3xl text-sm flex items-center justify-center gap-2 bouncy shadow-lg disabled:opacity-50 cursor-pointer"
+                  >
+                    {isIngAnalyzing ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Analyzing...
+                      </>
+                    ) : (
+                      <>
+                        <Camera className="w-5 h-5 text-white animate-pulse" />
+                        Auto-Register Scan
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>
